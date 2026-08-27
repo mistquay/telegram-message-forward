@@ -250,3 +250,21 @@ func TestExportPageDoneSemantics(t *testing.T) {
 		t.Fatal("还有下一页应为 Done=false 且带游标")
 	}
 }
+
+func TestInclusiveMessageIDRangeConversion(t *testing.T) {
+	if got := exclusiveLowerID(100); got != 99 {
+		t.Fatalf("下界转换 = %d, want 99", got)
+	}
+	if got := exclusiveUpperID(200); got != 201 {
+		t.Fatalf("上界转换 = %d, want 201", got)
+	}
+	if got := initialExportOffsetID(200); got != 201 {
+		t.Fatalf("首次 offset = %d, want 201", got)
+	}
+	if got := exclusiveLowerID(1); got != 0 {
+		t.Fatalf("消息 1 的下界不应产生负数: %d", got)
+	}
+	if got := exclusiveUpperID(1<<31 - 1); got != 0 {
+		t.Fatalf("最大 Telegram 消息 ID 不应溢出: %d", got)
+	}
+}

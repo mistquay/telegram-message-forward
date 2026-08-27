@@ -157,6 +157,8 @@ func (p *Plugin) withClient(ctx context.Context, acc *domainaccount.Account, fn 
 type historyQuery struct {
 	// OffsetID 是分页游标；0 表示从最新一条开始。
 	OffsetID int64
+	// OffsetDate 仅用于首次按时间定位。
+	OffsetDate int
 	// MinID / MaxID 是服务端过滤边界（开区间），0 表示不限。
 	MinID int64
 	MaxID int64
@@ -172,12 +174,13 @@ func (p *Plugin) getHistoryPage(ctx context.Context, client *telegram.Client, pe
 		size = historyPageSize
 	}
 	res, err := client.API().MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-		Peer:      peer,
-		OffsetID:  int(q.OffsetID),
-		AddOffset: q.AddOffset,
-		Limit:     size,
-		MinID:     int(q.MinID),
-		MaxID:     int(q.MaxID),
+		Peer:       peer,
+		OffsetID:   int(q.OffsetID),
+		OffsetDate: q.OffsetDate,
+		AddOffset:  q.AddOffset,
+		Limit:      size,
+		MinID:      int(q.MinID),
+		MaxID:      int(q.MaxID),
 	})
 	if err != nil {
 		return historyPage{}, fmt.Errorf("MessagesGetHistory 失败: %w", err)

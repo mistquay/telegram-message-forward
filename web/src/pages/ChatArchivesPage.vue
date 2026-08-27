@@ -7,11 +7,14 @@ import type {
   ChatArchive,
   ChatArchiveMessage,
   ChatExportJob,
+  ChatExportCreateRequest,
   SyncedPeer,
 } from '@/types'
 import { errText } from '@/utils/error'
 import PageHeader from '@/components/PageHeader.vue'
 import ClayIcon from '@/components/ClayIcon.vue'
+import ChatArchiveJobForm from '@/components/chatarchive/ChatArchiveJobForm.vue'
+import { downloadArchivePackage } from '@/composables/useArchiveDownload'
 
 const message = useMessage()
 
@@ -30,15 +33,6 @@ const creating = ref(false)
 const syncing = ref(false)
 const downloading = ref(false)
 
-// 新建任务表单。
-const form = ref({
-  accountId: null as number | null,
-  peerKey: null as string | null,
-  range: null as [number, number] | null,
-  maxMessages: 50000,
-  includeMedia: false,
-})
-
 // 检索条件。
 const filters = ref({
   q: '',
@@ -47,23 +41,9 @@ const filters = ref({
 })
 
 const exportFormat = ref<'jsonl' | 'csv' | 'md'>('jsonl')
+const exportWithMedia = shallowRef(false)
 
 let pollTimer: number | null = null
-
-const accountOptions = computed(() =>
-  accounts.value.map((a) => ({
-    label: `${a.name}（${a.status}）`,
-    value: a.id,
-    disabled: a.status !== 'active',
-  })),
-)
-
-const peerOptions = computed(() =>
-  peers.value.map((p) => ({
-    label: `${p.name}${p.username ? ' @' + p.username : ''} · ${p.display_type}`,
-    value: `${p.peer_type}:${p.peer_id}`,
-  })),
-)
 
 const directionOptions = [
   { label: '对方发出', value: 'in' },
@@ -104,14 +84,6 @@ function statusLabel(status: ChatExportJob['status']) {
 
 function archiveTitle(a: ChatArchive) {
   return a.peer_name || a.peer_username || `${a.peer_type}:${a.peer_id}`
-}
-
-function rangeParams() {
-  if (!form.value.range) return {}
-  return {
-    from_date: new Date(form.value.range[0]).toISOString(),
-    to_date: new Date(form.value.range[1]).toISOString(),
-  }
 }
 
 async function loadArchives() {
@@ -163,14 +135,10 @@ async function search(append = false) {
   }
 }
 
-async function syncPeers() {
-  if (!form.value.accountId) {
-    message.warning('请先选择账号')
-    return
-  }
+async function syncPeers(accountId: number) {
   syncing.value = true
   try {
-    peers.value = await sourcesApi.sync(form.value.accountId)
+    peers.value = await sourcesApi.sync(accountId)
     message.success(`已同步 ${peers.value.length} 个会话`)
   } catch (e) {
     message.error('同步会话列表失败：' + errText(e))
@@ -179,22 +147,10 @@ async function syncPeers() {
   }
 }
 
-async function createJob() {
-  if (!form.value.accountId || !form.value.peerKey) {
-    message.warning('请选择账号与会话')
-    return
-  }
-  const [peerType, peerId] = form.value.peerKey.split(':')
+async function createJob(request: ChatExportCreateRequest) {
   creating.value = true
   try {
-    const created = await chatArchiveApi.createJob({
-      account_id: form.value.accountId,
-      peer_type: peerType,
-      peer_id: Number(peerId),
-      max_messages: form.value.maxMessages || undefined,
-      include_media: form.value.includeMedia,
-      ...rangeParams(),
-    })
+    const created = await chatArchiveApi.createJob(request)
     message.success('归档任务已开始')
     await loadArchives()
     await selectArchive(created.archive)
@@ -202,6 +158,16 @@ async function createJob() {
     message.error('创建归档任务失败：' + errText(e))
   } finally {
     creating.value = false
+  }
+}
+
+async function resumeJob(job: ChatExportJob) {
+  try {
+    await chatArchiveApi.resumeJob(job.id)
+    message.success('续传任务已开始')
+    await loadJobs()
+  } catch (e) {
+    message.error('续传失败：' + errText(e))
   }
 }
 
@@ -219,10 +185,27 @@ async function download() {
   if (!selected.value) return
   downloading.value = true
   try {
-    const name = await chatArchiveApi.download(selected.value.id, {
-      format: exportFormat.value,
-      include_service: filters.value.includeService,
-    })
+    let name: string
+    if (exportWithMedia.value) {
+      const suggested = `${archiveTitle(selected.value).replace(/[\\/:*?"<>|]/g, '-')}-archive.zip`
+      const streamed = await downloadArchivePackage(
+        selected.value.id,
+        exportFormat.value,
+        suggested,
+        filters.value.includeService,
+      )
+      if (streamed === undefined) return
+      name = streamed ?? (await chatArchiveApi.download(selected.value.id, {
+        format: 'zip',
+        message_format: exportFormat.value,
+        include_service: filters.value.includeService,
+      }))
+    } else {
+      name = await chatArchiveApi.download(selected.value.id, {
+        format: exportFormat.value,
+        include_service: filters.value.includeService,
+      })
+    }
     message.success(`已导出 ${name}`)
   } catch (e) {
     message.error('导出失败：' + errText(e))
@@ -290,41 +273,14 @@ onUnmounted(() => {
     </PageHeader>
 
     <NCard title="新建归档" size="small">
-      <NSpace vertical :size="12">
-        <NSpace align="center" :size="12" wrap>
-          <NSelect
-            v-model:value="form.accountId"
-            :options="accountOptions"
-            placeholder="选择账号"
-            style="width: 220px"
-          />
-          <NButton :loading="syncing" @click="syncPeers">同步会话列表</NButton>
-          <NSelect
-            v-model:value="form.peerKey"
-            :options="peerOptions"
-            placeholder="选择会话（需先同步）"
-            filterable
-            style="width: 320px"
-          />
-        </NSpace>
-        <NSpace align="center" :size="12" wrap>
-          <NDatePicker v-model:value="form.range" type="datetimerange" clearable placeholder="时间范围（可选）" />
-          <NInputNumber
-            v-model:value="form.maxMessages"
-            :min="1"
-            :step="1000"
-            style="width: 180px"
-          >
-            <template #prefix>条数上限</template>
-          </NInputNumber>
-          <NCheckbox v-model:checked="form.includeMedia">下载媒体文件</NCheckbox>
-          <NButton type="primary" :loading="creating" @click="createJob">开始归档</NButton>
-        </NSpace>
-        <NText depth="3" style="font-size: 12px">
-          默认只记录媒体的元信息（类型、文件名、大小）。多年私聊的媒体可能有几十 GB，
-          确有需要再勾选下载。
-        </NText>
-      </NSpace>
+      <ChatArchiveJobForm
+        :accounts="accounts"
+        :peers="peers"
+        :creating="creating"
+        :syncing="syncing"
+        @sync="syncPeers"
+        @submit="createJob"
+      />
     </NCard>
 
     <div class="archive-body">
@@ -355,6 +311,7 @@ onUnmounted(() => {
             <NSpace align="center" justify="space-between">
               <NText strong>{{ archiveTitle(selected) }}</NText>
               <NSpace :size="8">
+                <NCheckbox v-model:checked="exportWithMedia">包含媒体</NCheckbox>
                 <NSelect
                   v-model:value="exportFormat"
                   :options="formatOptions"
@@ -383,6 +340,14 @@ onUnmounted(() => {
                   @click="cancelJob(j)"
                 >
                   取消
+                </NButton>
+                <NButton
+                  v-else-if="j.resume_from"
+                  size="tiny"
+                  secondary
+                  @click="resumeJob(j)"
+                >
+                  继续
                 </NButton>
               </div>
             </div>

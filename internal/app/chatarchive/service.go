@@ -29,6 +29,8 @@ var (
 	ErrAccountInactive = errors.New("账号未登录，无法拉取会话历史")
 	// ErrJobNotCancellable 表示任务已到终态。
 	ErrJobNotCancellable = errors.New("任务已结束，无法取消")
+	// ErrJobNotResumable 表示任务没有可继续的断点。
+	ErrJobNotResumable = errors.New("任务没有可继续的断点")
 )
 
 // Exporter 是拉取层能力（由 Telegram Source 插件实现）。
@@ -88,6 +90,8 @@ type CreateJobInput struct {
 	PeerID        int64
 	FromDate      *time.Time
 	ToDate        *time.Time
+	FromMessageID int64
+	ToMessageID   int64
 	MaxMessages   int
 	IncludeMedia  bool
 	MediaMaxBytes int64
@@ -107,6 +111,12 @@ func (s *Service) CreateJob(ctx context.Context, in CreateJobInput) (*domainarch
 	}
 	if in.FromDate != nil && in.ToDate != nil && !in.FromDate.Before(*in.ToDate) {
 		return nil, nil, fmt.Errorf("%w: 起始时间必须早于结束时间", ErrInvalidInput)
+	}
+	if err := validateMessageIDRange(in.FromMessageID, in.ToMessageID); err != nil {
+		return nil, nil, err
+	}
+	if (in.FromDate != nil || in.ToDate != nil) && (in.FromMessageID > 0 || in.ToMessageID > 0) {
+		return nil, nil, fmt.Errorf("%w: 时间范围与消息 ID 范围不能同时使用", ErrInvalidInput)
 	}
 	if in.MaxMessages < 0 {
 		return nil, nil, fmt.Errorf("%w: 条数上限不能为负", ErrInvalidInput)
@@ -138,6 +148,8 @@ func (s *Service) CreateJob(ctx context.Context, in CreateJobInput) (*domainarch
 		Status:        domainarchive.JobPending,
 		FromDate:      in.FromDate,
 		ToDate:        in.ToDate,
+		FromMessageID: in.FromMessageID,
+		ToMessageID:   in.ToMessageID,
 		IncludeMedia:  in.IncludeMedia,
 		MediaMaxBytes: in.MediaMaxBytes,
 		MaxMessages:   in.MaxMessages,
@@ -187,6 +199,8 @@ func (s *Service) execute(ctx context.Context, job *domainarchive.Job, archive *
 		PeerID:        archive.PeerID,
 		FromDate:      job.FromDate,
 		ToDate:        job.ToDate,
+		FromMessageID: job.FromMessageID,
+		ToMessageID:   job.ToMessageID,
 		MaxMessages:   job.MaxMessages,
 		OffsetID:      job.CursorOffsetID,
 		IncludeMedia:  job.IncludeMedia && s.media != nil,
@@ -263,8 +277,12 @@ func (s *Service) mediaPersister(archiveID int64) tgsource.MediaPersister {
 	}
 	return func(ctx context.Context, localPath string, m *domainarchive.Media) (string, error) {
 		key := archiveMediaKey(archiveID, localPath)
-		if _, err := s.media.PutFile(ctx, key, localPath); err != nil {
+		storedPath, err := s.media.PutFile(ctx, key, localPath)
+		if err != nil && storedPath == "" {
 			return "", err
+		}
+		if err != nil {
+			s.log.Warn("归档媒体远端存储失败，保留本地缓存", "archive", archiveID, "key", key, "err", err)
 		}
 		return key, nil
 	}
@@ -294,6 +312,41 @@ func (s *Service) Cancel(ctx context.Context, jobID int64) error {
 		cancel()
 	}
 	return nil
+}
+
+// Resume 从终态任务保存的断点创建一个新任务，原任务保持不变以便审计。
+func (s *Service) Resume(ctx context.Context, jobID int64) (*domainarchive.Job, error) {
+	previous, err := s.jobs.GetByID(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if !previous.Status.Terminal() || previous.CursorOffsetID <= 0 {
+		return nil, ErrJobNotResumable
+	}
+	archive, err := s.archives.GetByID(ctx, previous.ArchiveID)
+	if err != nil {
+		return nil, err
+	}
+	acc, err := s.accounts.GetByID(ctx, archive.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	if acc.Status != domainaccount.StatusActive {
+		return nil, ErrAccountInactive
+	}
+
+	job := &domainarchive.Job{
+		ArchiveID: archive.ID, Status: domainarchive.JobPending,
+		FromDate: previous.FromDate, ToDate: previous.ToDate,
+		FromMessageID: previous.FromMessageID, ToMessageID: previous.ToMessageID,
+		IncludeMedia: previous.IncludeMedia, MediaMaxBytes: previous.MediaMaxBytes,
+		MaxMessages: previous.MaxMessages, CursorOffsetID: previous.CursorOffsetID,
+	}
+	if err := s.jobs.Create(ctx, job); err != nil {
+		return nil, err
+	}
+	s.start(job, archive, acc)
+	return job, nil
 }
 
 // RecoverActive 在服务启动时把上次残留的进行中任务标记为失败。
@@ -337,6 +390,11 @@ func (s *Service) DeleteArchive(ctx context.Context, id int64) error {
 	if id <= 0 {
 		return ErrInvalidInput
 	}
+	if deleter, ok := s.media.(mediastore.PrefixDeleter); ok {
+		if err := deleter.DeletePrefix(ctx, fmt.Sprintf("%s%d/", mediastore.PersistentArchivePrefix, id)); err != nil {
+			return fmt.Errorf("删除归档媒体失败: %w", err)
+		}
+	}
 	return s.archives.Delete(ctx, id)
 }
 
@@ -368,6 +426,12 @@ func (s *Service) SearchMessages(ctx context.Context, q domainarchive.MessageQue
 	if q.From != nil && q.To != nil && !q.From.Before(*q.To) {
 		return nil, false, fmt.Errorf("%w: 起始时间必须早于结束时间", ErrInvalidInput)
 	}
+	if err := validateMessageIDRange(q.FromMessageID, q.ToMessageID); err != nil {
+		return nil, false, err
+	}
+	if (q.From != nil || q.To != nil) && (q.FromMessageID > 0 || q.ToMessageID > 0) {
+		return nil, false, fmt.Errorf("%w: 时间范围与消息 ID 范围不能同时使用", ErrInvalidInput)
+	}
 	if q.Limit <= 0 {
 		q.Limit = 50
 	}
@@ -375,6 +439,18 @@ func (s *Service) SearchMessages(ctx context.Context, q domainarchive.MessageQue
 		q.Limit = maxSearchLimit
 	}
 	return s.messages.Search(ctx, q)
+}
+
+const maxTelegramMessageID = int64(1<<31 - 1)
+
+func validateMessageIDRange(from, to int64) error {
+	if from < 0 || to < 0 || from > maxTelegramMessageID || to > maxTelegramMessageID {
+		return fmt.Errorf("%w: 消息 ID 必须在 1 到 %d 之间", ErrInvalidInput, maxTelegramMessageID)
+	}
+	if from > 0 && to > 0 && from > to {
+		return fmt.Errorf("%w: 起始消息 ID 不能大于结束消息 ID", ErrInvalidInput)
+	}
+	return nil
 }
 
 // peerDisplayName 从 peer 缓存取会话展示名；取不到时返回空串，不阻断归档。

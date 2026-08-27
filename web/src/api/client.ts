@@ -405,6 +405,8 @@ export const chatArchiveApi = {
   createJob: (body: ChatExportCreateRequest) =>
     http.post<ChatExportCreated>('/chat-exports', body).then((r) => r.data),
   cancelJob: (id: number) => http.post(`/chat-exports/${id}/cancel`),
+  resumeJob: (id: number) =>
+    http.post<ApiItem<ChatExportJob>>(`/chat-exports/${id}/resume`).then((r) => r.data.data),
 
   /**
    * 下载导出文件。
@@ -416,6 +418,7 @@ export const chatArchiveApi = {
     const resp = await http.get(`/chat-archives/${id}/download`, {
       params,
       responseType: 'blob',
+      timeout: 0,
     })
     const disposition = String(resp.headers['content-disposition'] ?? '')
     const matched = /filename="?([^"]+)"?/.exec(disposition)

@@ -126,4 +126,22 @@ func TestLocalCleanup(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(l.dir, "a", "new.jpg")); err != nil {
 		t.Fatalf("新文件不应被清理: %v", err)
 	}
+	archiveSrc := writeTempFile(t, "archive")
+	if _, err := l.PutFile(context.Background(), "chat-archive/3/old.jpg", archiveSrc); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(l.dir, "chat-archive", "3", "old.jpg")
+	if err := os.Chtimes(archivePath, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	removed, err = l.Cleanup(context.Background(), 24*time.Hour)
+	if err != nil || removed != 0 {
+		t.Fatalf("归档媒体不应参与 TTL 清理: removed=%d err=%v", removed, err)
+	}
+	if err := l.DeletePrefix(context.Background(), "chat-archive/3/"); err != nil {
+		t.Fatalf("DeletePrefix: %v", err)
+	}
+	if _, err := os.Stat(archivePath); !os.IsNotExist(err) {
+		t.Fatalf("删除归档后媒体前缀仍存在: %v", err)
+	}
 }

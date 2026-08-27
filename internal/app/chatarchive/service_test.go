@@ -150,6 +150,33 @@ type stubExporter struct {
 	opts  tgsource.ExportOptions
 }
 
+type stubAccountRepo struct {
+	account *domainaccount.Account
+}
+
+func (r stubAccountRepo) Create(context.Context, *domainaccount.Account) error { return nil }
+func (r stubAccountRepo) Update(context.Context, *domainaccount.Account) error { return nil }
+func (r stubAccountRepo) GetByID(context.Context, int64) (*domainaccount.Account, error) {
+	return r.account, nil
+}
+func (r stubAccountRepo) List(context.Context) ([]*domainaccount.Account, error) { return nil, nil }
+func (r stubAccountRepo) Delete(context.Context, int64) error                    { return nil }
+
+type blockingExporter struct {
+	opts chan tgsource.ExportOptions
+}
+
+func (e blockingExporter) ExportHistory(
+	ctx context.Context,
+	_ *domainaccount.Account,
+	opts tgsource.ExportOptions,
+	_ func(context.Context, tgsource.ExportPage) error,
+) error {
+	e.opts <- opts
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 func (e *stubExporter) ExportHistory(
 	ctx context.Context,
 	_ *domainaccount.Account,
@@ -320,11 +347,13 @@ func TestCreateJobValidatesInput(t *testing.T) {
 	to := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 
 	cases := map[string]CreateJobInput{
-		"非法会话类型": {AccountID: 1, PeerType: "bot", PeerID: 2},
-		"缺少账号":   {PeerType: "user", PeerID: 2},
-		"缺少会话":   {AccountID: 1, PeerType: "user"},
-		"时间窗颠倒":  {AccountID: 1, PeerType: "user", PeerID: 2, FromDate: &from, ToDate: &to},
-		"负数上限":   {AccountID: 1, PeerType: "user", PeerID: 2, MaxMessages: -1},
+		"非法会话类型":    {AccountID: 1, PeerType: "bot", PeerID: 2},
+		"缺少账号":      {PeerType: "user", PeerID: 2},
+		"缺少会话":      {AccountID: 1, PeerType: "user"},
+		"时间窗颠倒":     {AccountID: 1, PeerType: "user", PeerID: 2, FromDate: &from, ToDate: &to},
+		"ID 范围颠倒":   {AccountID: 1, PeerType: "user", PeerID: 2, FromMessageID: 20, ToMessageID: 10},
+		"时间与 ID 混用": {AccountID: 1, PeerType: "user", PeerID: 2, FromDate: &from, FromMessageID: 1},
+		"负数上限":      {AccountID: 1, PeerType: "user", PeerID: 2, MaxMessages: -1},
 	}
 	for name, in := range cases {
 		if _, _, err := svc.CreateJob(context.Background(), in); !errors.Is(err, ErrInvalidInput) {
@@ -361,6 +390,33 @@ func TestCancelRejectsTerminalJob(t *testing.T) {
 
 	if err := svc.Cancel(context.Background(), 1); !errors.Is(err, ErrJobNotCancellable) {
 		t.Fatalf("终态任务取消应报错，实际 %v", err)
+	}
+}
+
+func TestResumeCreatesJobFromSavedCursor(t *testing.T) {
+	archive := &domainarchive.Archive{ID: 3, AccountID: 4, PeerType: domainarchive.PeerUser, PeerID: 7}
+	jobs := &stubJobRepo{job: domainarchive.Job{
+		ID: 9, ArchiveID: archive.ID, Status: domainarchive.JobSucceeded,
+		FromMessageID: 100, ToMessageID: 900, CursorOffsetID: 555,
+		IncludeMedia: true, MaxMessages: 50,
+	}}
+	exporter := blockingExporter{opts: make(chan tgsource.ExportOptions, 1)}
+	svc := NewService(
+		&stubArchiveRepo{archive: archive}, &stubMessageRepo{}, jobs,
+		stubAccountRepo{account: &domainaccount.Account{ID: 4, Status: domainaccount.StatusActive}},
+		nil, exporter, clock.System{}, testLogger(),
+	).UseMediaStore(packageTestStore{})
+
+	job, err := svc.Resume(context.Background(), 9)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	opts := <-exporter.opts
+	if opts.OffsetID != 555 || opts.FromMessageID != 100 || opts.ToMessageID != 900 || !opts.IncludeMedia {
+		t.Fatalf("续传参数未继承: %+v", opts)
+	}
+	if err := svc.Cancel(context.Background(), job.ID); err != nil {
+		t.Fatalf("取消续传任务: %v", err)
 	}
 }
 

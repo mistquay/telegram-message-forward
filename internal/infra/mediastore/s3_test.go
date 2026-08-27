@@ -53,7 +53,7 @@ func listBucketXML(newTime string) string {
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <Name>media-bucket</Name>
   <Prefix>tmf/</Prefix>
-  <KeyCount>2</KeyCount>
+  <KeyCount>3</KeyCount>
   <MaxKeys>1000</MaxKeys>
   <IsTruncated>false</IsTruncated>
   <Contents>
@@ -67,6 +67,13 @@ func listBucketXML(newTime string) string {
     <Key>tmf/telegram/source_1/new.jpg</Key>
     <LastModified>%s</LastModified>
     <ETag>&quot;b&quot;</ETag>
+    <Size>3</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+  <Contents>
+    <Key>tmf/chat-archive/3/old.jpg</Key>
+    <LastModified>2020-01-01T00:00:00.000Z</LastModified>
+    <ETag>&quot;c&quot;</ETag>
     <Size>3</Size>
     <StorageClass>STANDARD</StorageClass>
   </Contents>
@@ -91,6 +98,9 @@ func TestS3CleanupRemovesExpiredObjects(t *testing.T) {
 	}
 	if _, ok := deleted.Load("tmf/telegram/source_1/new.jpg"); ok {
 		t.Fatal("保留期内对象不应被删除")
+	}
+	if _, ok := deleted.Load("tmf/chat-archive/3/old.jpg"); ok {
+		t.Fatal("归档对象不应参与通用 TTL 清理")
 	}
 }
 

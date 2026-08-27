@@ -31,6 +31,9 @@ type ExportOptions struct {
 	// FromDate / ToDate 是可选时间窗，左闭右开。
 	FromDate *time.Time
 	ToDate   *time.Time
+	// FromMessageID / ToMessageID 是可选消息 ID 闭区间，0 表示不限。
+	FromMessageID int64
+	ToMessageID   int64
 
 	// MaxMessages 是本次拉取的条数硬顶，0 表示不限。
 	MaxMessages int
@@ -88,9 +91,12 @@ func (p *Plugin) ExportHistory(
 
 	return p.withClient(ctx, acc, func(ctx context.Context, client *telegram.Client) error {
 		offsetID := opts.OffsetID
+		if offsetID == 0 {
+			offsetID = initialExportOffsetID(opts.ToMessageID)
+		}
 		// 仅在从头开始时用 OffsetDate 定位时间窗上界；续传时以 OffsetID 为准。
 		offsetDate := 0
-		if offsetID == 0 && opts.ToDate != nil {
+		if opts.OffsetID == 0 && offsetID == 0 && opts.ToDate != nil {
 			offsetDate = int(opts.ToDate.Unix())
 		}
 
@@ -108,7 +114,12 @@ func (p *Plugin) ExportHistory(
 				return visit(ctx, ExportPage{Done: true, NextOffsetID: offsetID})
 			}
 
-			got, err := p.getExportPage(ctx, client, inputPeer, offsetID, offsetDate, size)
+			got, err := p.getHistoryPage(ctx, client, inputPeer, historyQuery{
+				OffsetID: offsetID, OffsetDate: offsetDate,
+				MinID:    exclusiveLowerID(opts.FromMessageID),
+				MaxID:    exclusiveUpperID(opts.ToMessageID),
+				PageSize: size,
+			})
 			if err != nil {
 				return err
 			}
@@ -135,6 +146,13 @@ func (p *Plugin) ExportHistory(
 					continue
 				}
 				if opts.ToDate != nil && m.Date != nil && !m.Date.Before(*opts.ToDate) {
+					continue
+				}
+				if opts.FromMessageID > 0 && m.MessageID < opts.FromMessageID {
+					reachedLowerBound = true
+					continue
+				}
+				if opts.ToMessageID > 0 && m.MessageID > opts.ToMessageID {
 					continue
 				}
 				out.Messages = append(out.Messages, m)
@@ -176,25 +194,23 @@ func (p *Plugin) ExportHistory(
 	})
 }
 
-// getExportPage 取一页导出数据。
-func (p *Plugin) getExportPage(
-	ctx context.Context,
-	client *telegram.Client,
-	peer tg.InputPeerClass,
-	offsetID int64,
-	offsetDate int,
-	size int,
-) (historyPage, error) {
-	res, err := client.API().MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-		Peer:       peer,
-		OffsetID:   int(offsetID),
-		OffsetDate: offsetDate,
-		Limit:      size,
-	})
-	if err != nil {
-		return historyPage{}, fmt.Errorf("MessagesGetHistory 失败: %w", err)
+// Telegram 的 min_id/max_id 是开区间，产品输入是闭区间。
+func exclusiveLowerID(id int64) int64 {
+	if id <= 1 {
+		return 0
 	}
-	return unpackHistoryPage(res), nil
+	return id - 1
+}
+
+func exclusiveUpperID(id int64) int64 {
+	if id <= 0 || id >= int64(^uint32(0)>>1) {
+		return 0
+	}
+	return id + 1
+}
+
+func initialExportOffsetID(toMessageID int64) int64 {
+	return exclusiveUpperID(toMessageID)
 }
 
 // downloadArchiveMedia 下载本页媒体并回填 storage key，返回成功条数。

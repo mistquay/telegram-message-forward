@@ -28,6 +28,7 @@ func NewManager() *Manager {
 }
 
 var _ Store = (*Manager)(nil)
+var _ PrefixDeleter = (*Manager)(nil)
 
 // Swap 原子替换当前生效的存储实现与保留期。
 func (m *Manager) Swap(store Store, local *Local, retention time.Duration) {
@@ -67,6 +68,19 @@ func (m *Manager) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("媒体存储未初始化")
 	}
 	return b.store.Open(ctx, key)
+}
+
+// DeletePrefix 委托当前存储删除业务命名空间。
+func (m *Manager) DeletePrefix(ctx context.Context, prefix string) error {
+	b := m.cur.Load()
+	if b == nil {
+		return fmt.Errorf("媒体存储未初始化")
+	}
+	deleter, ok := b.store.(PrefixDeleter)
+	if !ok {
+		return fmt.Errorf("当前媒体存储不支持按前缀删除")
+	}
+	return deleter.DeletePrefix(ctx, prefix)
 }
 
 // Cleanup 委托当前存储。

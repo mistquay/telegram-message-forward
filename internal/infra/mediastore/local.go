@@ -41,6 +41,7 @@ func NewLocal(dir, publicBaseURL string, signKey []byte, urlTTL time.Duration) *
 }
 
 var _ Store = (*Local)(nil)
+var _ PrefixDeleter = (*Local)(nil)
 
 // PutFile 将 srcPath 移动到 dir/key。
 func (l *Local) PutFile(_ context.Context, key, srcPath string) (string, error) {
@@ -78,6 +79,23 @@ func (l *Local) Open(_ context.Context, key string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("非法存储键: %q", key)
 	}
 	return os.Open(filepath.Join(l.dir, filepath.FromSlash(key)))
+}
+
+// DeletePrefix 删除指定业务命名空间；prefix 必须是安全的相对路径。
+func (l *Local) DeletePrefix(_ context.Context, prefix string) error {
+	cleaned := strings.TrimSuffix(prefix, "/")
+	if !ValidKey(cleaned) {
+		return fmt.Errorf("非法存储前缀: %q", prefix)
+	}
+	target := filepath.Join(l.dir, filepath.FromSlash(cleaned))
+	rel, err := filepath.Rel(l.dir, target)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return fmt.Errorf("存储前缀越界: %q", prefix)
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return fmt.Errorf("删除媒体前缀失败: %w", err)
+	}
+	return nil
 }
 
 // Cleanup 删除早于 olderThan 的本地文件。

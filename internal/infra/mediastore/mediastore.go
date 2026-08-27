@@ -19,6 +19,9 @@ import (
 // ErrCleanupInProgress 表示已有媒体清理任务正在执行。
 var ErrCleanupInProgress = errors.New("已有媒体清理任务正在执行")
 
+// PersistentArchivePrefix 下的文件由聊天归档生命周期管理，不参与通用 TTL 清理。
+const PersistentArchivePrefix = "chat-archive/"
+
 // CleanupResult 分别统计本地缓存和远端对象的删除数量。
 type CleanupResult struct {
 	DeletedLocalFiles    int `json:"deleted_local_files"`
@@ -28,6 +31,11 @@ type CleanupResult struct {
 // DetailedCleaner 支持显式选择本地和远端清理范围。
 type DetailedCleaner interface {
 	CleanupDetailed(ctx context.Context, olderThan time.Duration, deleteLocal, deleteRemote bool) (CleanupResult, error)
+}
+
+// PrefixDeleter 删除一个业务命名空间下的全部文件。
+type PrefixDeleter interface {
+	DeletePrefix(ctx context.Context, prefix string) error
 }
 
 // Store 是媒体存储接口。
@@ -94,6 +102,13 @@ func cleanupDir(dir string, cutoff time.Time) (int, error) {
 			return err
 		}
 		if info.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, p)
+		if relErr != nil {
+			return relErr
+		}
+		if strings.HasPrefix(filepath.ToSlash(rel), PersistentArchivePrefix) {
 			return nil
 		}
 		if info.ModTime().Before(cutoff) {

@@ -149,3 +149,21 @@ func TestPeerTypeValid(t *testing.T) {
 		t.Fatal("未知 peer 类型不应通过校验")
 	}
 }
+
+func TestHasDownloadedMedia(t *testing.T) {
+	if hasDownloadedMedia([]domainarchive.Media{{Downloaded: true}}) {
+		t.Fatal("缺少 storage_key 不能视为可用媒体")
+	}
+	if !hasDownloadedMedia([]domainarchive.Media{{Downloaded: true, StorageKey: "chat-archive/1/a.jpg"}}) {
+		t.Fatal("已下载且有 storage_key 的媒体应允许补写")
+	}
+}
+
+func TestJobModelKeepsIDRangeAndResumeCursor(t *testing.T) {
+	model := toJobModel(&domainarchive.Job{
+		ArchiveID: 1, FromMessageID: 10, ToMessageID: 20, CursorOffsetID: 15,
+	})
+	if model.FromMessageID != 10 || model.ToMessageID != 20 || model.CursorOffsetID != 15 {
+		t.Fatalf("任务范围或断点映射丢失: %+v", model)
+	}
+}

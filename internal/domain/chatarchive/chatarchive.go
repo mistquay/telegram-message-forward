@@ -147,6 +147,9 @@ type Job struct {
 	Status    JobStatus
 	FromDate  *time.Time
 	ToDate    *time.Time
+	// FromMessageID / ToMessageID 是用户指定的闭区间，0 表示不限制。
+	FromMessageID int64
+	ToMessageID   int64
 	// IncludeMedia 默认 false：只归档媒体元信息，不下载文件。
 	IncludeMedia  bool
 	MediaMaxBytes int64
@@ -176,6 +179,8 @@ type MessageQuery struct {
 	IncludeService bool
 	From           *time.Time
 	To             *time.Time
+	FromMessageID  int64
+	ToMessageID    int64
 	BeforeID       int64
 	Limit          int
 }
@@ -185,6 +190,8 @@ type ExportQuery struct {
 	ArchiveID      int64
 	From           *time.Time
 	To             *time.Time
+	FromMessageID  int64
+	ToMessageID    int64
 	IncludeService bool
 	// AfterID 是流式分批读取的游标（主键升序）。
 	AfterID int64

@@ -1,6 +1,7 @@
 package api_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -107,7 +108,7 @@ func TestChatArchiveRoutesRequireAuth(t *testing.T) {
 			t.Fatalf("%s 无 token 应 401，实际 %d", path, code)
 		}
 	}
-	for _, path := range []string{"/api/v1/chat-exports", "/api/v1/chat-exports/1/cancel"} {
+	for _, path := range []string{"/api/v1/chat-exports", "/api/v1/chat-exports/1/cancel", "/api/v1/chat-exports/1/resume"} {
 		if code, _ := do(t, r, http.MethodPost, path, "", nil); code != http.StatusUnauthorized {
 			t.Fatalf("%s 无 token 应 401", path)
 		}
@@ -172,6 +173,19 @@ func TestChatArchiveDownloadStreamsAndSetsHeaders(t *testing.T) {
 		t.Fatalf("导出内容异常: %s", body)
 	}
 
+	code, body, hdr = doWithHeaders(t, r, http.MethodGet,
+		"/api/v1/chat-archives/1/download?format=zip&message_format=jsonl", token)
+	if code != http.StatusOK || hdr.Get("Content-Type") != "application/zip" {
+		t.Fatalf("ZIP 下载 = %d content-type=%q", code, hdr.Get("Content-Type"))
+	}
+	zr, err := zip.NewReader(strings.NewReader(body), int64(len(body)))
+	if err != nil {
+		t.Fatalf("ZIP 响应无效: %v", err)
+	}
+	if len(zr.File) != 2 || zr.File[0].Name != "messages.jsonl" || zr.File[1].Name != "manifest.json" {
+		t.Fatalf("ZIP 文件结构异常: %+v", zr.File)
+	}
+
 	// 非法格式必须在写响应头之前拦掉。
 	if code, _, _ = doWithHeaders(t, r, http.MethodGet, "/api/v1/chat-archives/1/download?format=pdf", token); code != http.StatusBadRequest {
 		t.Fatalf("非法格式应 400，实际 %d", code)
@@ -187,6 +201,8 @@ func TestChatArchiveSearchRejectsBadParams(t *testing.T) {
 		"/api/v1/chat-archives/1/messages?direction=sideways",
 		"/api/v1/chat-archives/1/messages?include_service=maybe",
 		"/api/v1/chat-archives/1/messages?from=not-a-time",
+		"/api/v1/chat-archives/1/messages?from_message_id=abc",
+		"/api/v1/chat-archives/1/messages?from=2026-01-01T00:00:00Z&from_message_id=1",
 	} {
 		if code, body := do(t, r, http.MethodGet, path, token, nil); code != http.StatusBadRequest {
 			t.Fatalf("%s 应 400，实际 %d: %s", path, code, body)

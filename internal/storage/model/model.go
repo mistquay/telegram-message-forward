@@ -464,6 +464,8 @@ type ChatExportJob struct {
 	Status          string
 	FromDate        *time.Time
 	ToDate          *time.Time
+	FromMessageID   int64
+	ToMessageID     int64
 	IncludeMedia    bool
 	MediaMaxBytes   int64
 	MaxMessages     int

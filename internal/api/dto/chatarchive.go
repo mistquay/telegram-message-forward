@@ -48,11 +48,13 @@ func NewChatArchiveDTOs(items []*domainarchive.Archive) []ChatArchiveDTO {
 
 // ChatExportJobDTO 是导出任务的对外表示。
 type ChatExportJobDTO struct {
-	ID        int64      `json:"id"`
-	ArchiveID int64      `json:"archive_id"`
-	Status    string     `json:"status"`
-	FromDate  *time.Time `json:"from_date,omitempty"`
-	ToDate    *time.Time `json:"to_date,omitempty"`
+	ID            int64      `json:"id"`
+	ArchiveID     int64      `json:"archive_id"`
+	Status        string     `json:"status"`
+	FromDate      *time.Time `json:"from_date,omitempty"`
+	ToDate        *time.Time `json:"to_date,omitempty"`
+	FromMessageID int64      `json:"from_message_id,omitempty"`
+	ToMessageID   int64      `json:"to_message_id,omitempty"`
 
 	IncludeMedia  bool  `json:"include_media"`
 	MediaMaxBytes int64 `json:"media_max_bytes,omitempty"`
@@ -78,6 +80,7 @@ func NewChatExportJobDTO(j *domainarchive.Job) ChatExportJobDTO {
 	return ChatExportJobDTO{
 		ID: j.ID, ArchiveID: j.ArchiveID, Status: string(j.Status),
 		FromDate: j.FromDate, ToDate: j.ToDate,
+		FromMessageID: j.FromMessageID, ToMessageID: j.ToMessageID,
 		IncludeMedia: j.IncludeMedia, MediaMaxBytes: j.MediaMaxBytes, MaxMessages: j.MaxMessages,
 		FetchedCount: j.FetchedCount, MediaCount: j.MediaCount,
 		ResumeFrom: j.CursorOffsetID, CancelRequested: j.CancelRequested,

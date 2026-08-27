@@ -221,3 +221,14 @@ cd web && npm run build
 | 7  | [x] | jsonl/csv/md 流式渲染 |
 | 8  | [x] | chat-exports / chat-archives 全套 |
 | 9  | [x] | ChatArchivesPage + 路由 + 侧栏 |
+
+## 15. 消息 ID 范围与媒体包增强（2026-08-27）
+
+- [x] 归档任务支持时间范围 / 消息 ID 闭区间两种互斥模式。
+- [x] `messages.getHistory` 使用 `min_id` / `max_id` 服务端过滤，并在本地再次校验闭区间边界。
+- [x] 任务达到条数上限、失败或取消后，可从 `cursor_offset_id` 创建续传任务。
+- [x] 重拉已有消息时可把已下载媒体补写到 `media`，纯元数据重拉不会覆盖已有下载结果。
+- [x] 归档媒体不参与通用媒体 TTL 清理；删除归档时同步删除对应媒体前缀。
+- [x] 支持 ZIP 流式导出，包内包含 `messages.<format>`、`media/` 和 `manifest.json`。
+- [x] manifest 明确记录已包含、未下载、缺失媒体；导出请求不临时连接 Telegram 补拉。
+- [x] 前端拆出归档任务表单，支持范围模式切换、字段内校验、续传和流式大包下载。

@@ -874,6 +874,8 @@ export interface ChatExportJob {
   status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
   from_date?: string
   to_date?: string
+  from_message_id?: number
+  to_message_id?: number
   include_media: boolean
   media_max_bytes?: number
   max_messages?: number
@@ -929,6 +931,8 @@ export interface ChatExportCreateRequest {
   peer_id: number
   from_date?: string
   to_date?: string
+  from_message_id?: number
+  to_message_id?: number
   max_messages?: number
   include_media?: boolean
   media_max_bytes?: number

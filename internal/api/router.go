@@ -187,6 +187,7 @@ func NewRouter(deps Deps) *gin.Engine {
 				exports.POST("", deps.ChatArchive.CreateJob)
 				exports.GET("/:id", deps.ChatArchive.GetJob)
 				exports.POST("/:id/cancel", deps.ChatArchive.CancelJob)
+				exports.POST("/:id/resume", deps.ChatArchive.ResumeJob)
 			}
 
 			archives := v1.Group("/chat-archives")

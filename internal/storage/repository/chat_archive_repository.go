@@ -171,6 +171,17 @@ func (r *ChatArchiveMessageRepository) BulkUpsert(ctx context.Context, archiveID
 				return res.Error
 			}
 			inserted += res.RowsAffected
+			for i, msg := range msgs[start:end] {
+				if !hasDownloadedMedia(msg.Media) {
+					continue
+				}
+				row := rows[start+i]
+				if err := tx.Model(&model.ChatArchiveMessage{}).
+					Where("archive_id = ? AND message_id = ?", archiveID, msg.MessageID).
+					Update("media", row.Media).Error; err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	})
@@ -178,6 +189,15 @@ func (r *ChatArchiveMessageRepository) BulkUpsert(ctx context.Context, archiveID
 		return 0, err
 	}
 	return inserted, nil
+}
+
+func hasDownloadedMedia(items []domainarchive.Media) bool {
+	for _, item := range items {
+		if item.Downloaded && item.StorageKey != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Search 按检索条件倒序分页查询归档消息。
@@ -203,6 +223,12 @@ func (r *ChatArchiveMessageRepository) Search(ctx context.Context, q domainarchi
 	}
 	if q.To != nil {
 		db = db.Where("date < ?", *q.To)
+	}
+	if q.FromMessageID > 0 {
+		db = db.Where("message_id >= ?", q.FromMessageID)
+	}
+	if q.ToMessageID > 0 {
+		db = db.Where("message_id <= ?", q.ToMessageID)
 	}
 	if q.BeforeID > 0 {
 		db = db.Where("id < ?", q.BeforeID)
@@ -236,6 +262,12 @@ func (r *ChatArchiveMessageRepository) StreamPage(ctx context.Context, q domaina
 	}
 	if q.To != nil {
 		db = db.Where("date < ?", *q.To)
+	}
+	if q.FromMessageID > 0 {
+		db = db.Where("message_id >= ?", q.FromMessageID)
+	}
+	if q.ToMessageID > 0 {
+		db = db.Where("message_id <= ?", q.ToMessageID)
 	}
 	if q.AfterID > 0 {
 		db = db.Where("id > ?", q.AfterID)
@@ -459,13 +491,16 @@ func toJobModel(j *domainarchive.Job) *model.ChatExportJob {
 		status = domainarchive.JobPending
 	}
 	return &model.ChatExportJob{
-		ArchiveID:     j.ArchiveID,
-		Status:        string(status),
-		FromDate:      j.FromDate,
-		ToDate:        j.ToDate,
-		IncludeMedia:  j.IncludeMedia,
-		MediaMaxBytes: j.MediaMaxBytes,
-		MaxMessages:   j.MaxMessages,
+		ArchiveID:      j.ArchiveID,
+		Status:         string(status),
+		FromDate:       j.FromDate,
+		ToDate:         j.ToDate,
+		FromMessageID:  j.FromMessageID,
+		ToMessageID:    j.ToMessageID,
+		IncludeMedia:   j.IncludeMedia,
+		MediaMaxBytes:  j.MediaMaxBytes,
+		MaxMessages:    j.MaxMessages,
+		CursorOffsetID: j.CursorOffsetID,
 	}
 }
 
@@ -484,6 +519,8 @@ func toJobDomain(mo *model.ChatExportJob) *domainarchive.Job {
 		Status:          domainarchive.JobStatus(mo.Status),
 		FromDate:        mo.FromDate,
 		ToDate:          mo.ToDate,
+		FromMessageID:   mo.FromMessageID,
+		ToMessageID:     mo.ToMessageID,
 		IncludeMedia:    mo.IncludeMedia,
 		MediaMaxBytes:   mo.MediaMaxBytes,
 		MaxMessages:     mo.MaxMessages,

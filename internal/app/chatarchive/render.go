@@ -83,13 +83,9 @@ type exportRow struct {
 // 全程流式：按主键分批读库、边读边写。几万条消息的 JSONL 有几十 MB，
 // 先在内存里拼完整个文件会直接把服务打爆。
 func (s *Service) Render(ctx context.Context, format Format, q domainarchive.ExportQuery, w io.Writer) error {
-	if q.ArchiveID <= 0 {
-		return ErrInvalidInput
+	if err := ValidateExportQuery(q); err != nil {
+		return err
 	}
-	if q.From != nil && q.To != nil && !q.From.Before(*q.To) {
-		return fmt.Errorf("%w: 起始时间必须早于结束时间", ErrInvalidInput)
-	}
-	q.Limit = renderBatch
 
 	buf := bufio.NewWriterSize(w, 64*1024)
 	var (
@@ -106,6 +102,35 @@ func (s *Service) Render(ctx context.Context, format Format, q domainarchive.Exp
 		writeRow, flushTail = s.jsonlRenderer(buf)
 	}
 
+	if err := s.streamMessages(ctx, q, writeRow); err != nil {
+		return err
+	}
+
+	if err := flushTail(); err != nil {
+		return err
+	}
+	return buf.Flush()
+}
+
+// ValidateExportQuery 在响应头写出前校验导出条件。
+func ValidateExportQuery(q domainarchive.ExportQuery) error {
+	if q.ArchiveID <= 0 {
+		return ErrInvalidInput
+	}
+	if q.From != nil && q.To != nil && !q.From.Before(*q.To) {
+		return fmt.Errorf("%w: 起始时间必须早于结束时间", ErrInvalidInput)
+	}
+	if err := validateMessageIDRange(q.FromMessageID, q.ToMessageID); err != nil {
+		return err
+	}
+	if (q.From != nil || q.To != nil) && (q.FromMessageID > 0 || q.ToMessageID > 0) {
+		return fmt.Errorf("%w: 时间范围与消息 ID 范围不能同时使用", ErrInvalidInput)
+	}
+	return nil
+}
+
+func (s *Service) streamMessages(ctx context.Context, q domainarchive.ExportQuery, visit func(*domainarchive.Message) error) error {
+	q.Limit = renderBatch
 	afterID := int64(0)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -117,23 +142,18 @@ func (s *Service) Render(ctx context.Context, format Format, q domainarchive.Exp
 			return err
 		}
 		if len(page) == 0 {
-			break
+			return nil
 		}
 		for _, m := range page {
-			if err := writeRow(m); err != nil {
+			if err := visit(m); err != nil {
 				return err
 			}
 			afterID = m.ID
 		}
 		if len(page) < renderBatch {
-			break
+			return nil
 		}
 	}
-
-	if err := flushTail(); err != nil {
-		return err
-	}
-	return buf.Flush()
 }
 
 func (s *Service) jsonlRenderer(w io.Writer) (func(*domainarchive.Message) error, func() error) {
@@ -320,6 +340,12 @@ func ExportFileName(archive *domainarchive.Archive, format Format) string {
 		}
 	}
 	return fmt.Sprintf("%s-archive.%s", sanitizeFileName(name), format)
+}
+
+// PackageFileName 生成带媒体 ZIP 的下载文件名。
+func PackageFileName(archive *domainarchive.Archive) string {
+	base := strings.TrimSuffix(ExportFileName(archive, FormatJSONL), ".jsonl")
+	return base + ".zip"
 }
 
 // sanitizeFileName 去掉路径分隔符与控制字符，避免 Content-Disposition 被注入。

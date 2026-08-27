@@ -89,6 +89,7 @@ func TestS3(ctx context.Context, opts S3Options) error {
 }
 
 var _ Store = (*S3)(nil)
+var _ PrefixDeleter = (*S3)(nil)
 
 // PutFile 先纳入本地缓存，再上传对象存储。
 // 上传失败时返回本地路径与错误：调用方可保留本地文件降级使用。
@@ -138,6 +139,28 @@ func (s *S3) Open(ctx context.Context, key string) (io.ReadCloser, error) {
 	return obj, nil
 }
 
+// DeletePrefix 删除本地缓存和对象存储中的指定业务命名空间。
+func (s *S3) DeletePrefix(ctx context.Context, prefix string) error {
+	if err := s.local.DeletePrefix(ctx, prefix); err != nil {
+		return err
+	}
+	cleaned := strings.TrimSuffix(prefix, "/")
+	if !ValidKey(cleaned) {
+		return fmt.Errorf("非法存储前缀: %q", prefix)
+	}
+	objectPrefix := s.objectKey(cleaned) + "/"
+	var removeErr error
+	for obj := range s.client.ListObjects(ctx, s.opts.Bucket, minio.ListObjectsOptions{Prefix: objectPrefix, Recursive: true}) {
+		if obj.Err != nil {
+			return errors.Join(removeErr, fmt.Errorf("遍历对象存储失败: %w", obj.Err))
+		}
+		if err := s.client.RemoveObject(ctx, s.opts.Bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
+			removeErr = errors.Join(removeErr, fmt.Errorf("删除对象 %q 失败: %w", obj.Key, err))
+		}
+	}
+	return removeErr
+}
+
 // Cleanup 清理本地缓存；开启 AutoCleanup 时同步删除对象存储中过期的对象，
 // 否则对象存储侧交由桶生命周期规则处理。
 func (s *S3) Cleanup(ctx context.Context, olderThan time.Duration) (int, error) {
@@ -173,6 +196,10 @@ func (s *S3) CleanupDetailed(ctx context.Context, olderThan time.Duration, delet
 			break
 		}
 		if obj.LastModified.IsZero() || !obj.LastModified.Before(cutoff) {
+			continue
+		}
+		relativeKey := strings.TrimPrefix(obj.Key, prefix)
+		if strings.HasPrefix(relativeKey, PersistentArchivePrefix) {
 			continue
 		}
 		if err := s.client.RemoveObject(ctx, s.opts.Bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
