@@ -33,14 +33,14 @@
 ```yaml
 services:
   config-init:
-    image: ghcr.io/zyd16888/telegram-message-forward:nightly
+    image: ghcr.io/mistquay/telegram-message-forward:nightly
     command: ["-init-config", "/app/configs/config.yaml"]
     volumes:
       - ./configs:/app/configs
     restart: "no"
 
   app:
-    image: ghcr.io/zyd16888/telegram-message-forward:nightly
+    image: ghcr.io/mistquay/telegram-message-forward:nightly
     restart: unless-stopped
     depends_on:
       config-init:
