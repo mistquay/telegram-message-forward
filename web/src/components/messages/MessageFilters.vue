@@ -14,8 +14,9 @@ const sourceTypes = [
   { label: 'RSS', value: 'rss' }, { label: 'Webhook', value: 'webhook' },
 ]
 const messageTypes = [
-  { label: '全部消息类型', value: '' }, { label: '文本', value: 'text' }, { label: '图片', value: 'photo' },
+  { label: '全部消息类型', value: '' }, { label: '文本', value: 'text' }, { label: '照片', value: 'photo' }, { label: '图片文件', value: 'image' },
   { label: '视频', value: 'video' }, { label: '文件', value: 'document' }, { label: '音频', value: 'audio' },
+  { label: '语音', value: 'voice' }, { label: '位置', value: 'geo' }, { label: '联系人', value: 'contact' }, { label: '投票', value: 'poll' }, { label: '其他媒体', value: 'media' },
 ]
 const deliveryStatuses = [
   { label: '全部投递状态', value: '' }, { label: '未产生投递', value: 'none' },

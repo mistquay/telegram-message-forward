@@ -58,8 +58,8 @@ func messageType(msg *tg.Message) string {
 	case *tg.MessageMediaPhoto:
 		return "photo"
 	case *tg.MessageMediaDocument:
-		if doc, ok := mediaDocument(m); ok && isImageMIME(doc.MimeType) {
-			return "image"
+		if doc, ok := mediaDocument(m); ok {
+			return documentMediaType(doc)
 		}
 		return "document"
 	case *tg.MessageMediaWebPage:
@@ -138,10 +138,7 @@ func extractMedia(msg *tg.Message) []domainmessage.Media {
 		if !ok {
 			return nil
 		}
-		item := domainmessage.Media{Type: "document", MimeType: doc.MimeType, Size: doc.Size, Caption: msg.Message}
-		if isImageMIME(doc.MimeType) {
-			item.Type = "image"
-		}
+		item := domainmessage.Media{Type: documentMediaType(doc), MimeType: doc.MimeType, Size: doc.Size, Caption: msg.Message}
 		for _, attr := range doc.Attributes {
 			switch a := attr.(type) {
 			case *tg.DocumentAttributeFilename:
@@ -149,6 +146,8 @@ func extractMedia(msg *tg.Message) []domainmessage.Media {
 			case *tg.DocumentAttributeImageSize:
 				item.Width = a.W
 				item.Height = a.H
+			case *tg.DocumentAttributeVideo:
+				item.Width, item.Height = a.W, a.H
 			}
 		}
 		if item.FileName == "" {
@@ -158,6 +157,30 @@ func extractMedia(msg *tg.Message) []domainmessage.Media {
 	default:
 		return nil
 	}
+}
+
+func documentMediaType(doc *tg.Document) string {
+	for _, attr := range doc.Attributes {
+		switch a := attr.(type) {
+		case *tg.DocumentAttributeAudio:
+			if a.Voice {
+				return "voice"
+			}
+			return "audio"
+		case *tg.DocumentAttributeVideo:
+			return "video"
+		}
+	}
+	if isImageMIME(doc.MimeType) {
+		return "image"
+	}
+	if strings.HasPrefix(strings.ToLower(doc.MimeType), "video/") {
+		return "video"
+	}
+	if strings.HasPrefix(strings.ToLower(doc.MimeType), "audio/") {
+		return "audio"
+	}
+	return "document"
 }
 
 type photoSizeInfo struct {
