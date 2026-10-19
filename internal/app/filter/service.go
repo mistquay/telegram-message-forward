@@ -3,9 +3,9 @@ package filter
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	domainfilter "telegram-message-forward/internal/domain/filter"
 	domainflow "telegram-message-forward/internal/domain/flow"
@@ -15,6 +15,7 @@ import (
 // Service 是过滤器应用服务。
 type Service struct {
 	repo domainfilter.Repository
+	deps DiagnosticsDeps
 }
 
 func NewService(repo domainfilter.Repository) *Service {
@@ -23,6 +24,7 @@ func NewService(repo domainfilter.Repository) *Service {
 
 // Input 是过滤器创建/更新输入。
 type Input struct {
+	Revision    int
 	Name        string
 	Description string
 	Conditions  []domainflow.ConditionConfig
@@ -54,6 +56,9 @@ func (s *Service) Update(ctx context.Context, id int64, in Input) (*domainfilter
 	}
 	f := fromInput(id, in)
 	f.CreatedAt = existing.CreatedAt
+	if in.Revision > 0 && in.Revision != existing.Revision {
+		return nil, fmt.Errorf("%w，请刷新后重试", domainfilter.ErrConflict)
+	}
 	f.Revision = existing.Revision
 	if err := s.validate(f); err != nil {
 		return nil, err
@@ -70,7 +75,7 @@ func (s *Service) Delete(ctx context.Context, id int64) error {
 		return err
 	}
 	if count > 0 {
-		return fmt.Errorf("该过滤器仍被 %d 处（Flow/AI 整理）引用，无法删除", count)
+		return fmt.Errorf("%w：%d 处（Flow/AI 整理），无法删除", domainfilter.ErrInUse, count)
 	}
 	return s.repo.Delete(ctx, id)
 }
@@ -86,10 +91,16 @@ func fromInput(id int64, in Input) *domainfilter.Filter {
 
 func (s *Service) validate(f *domainfilter.Filter) error {
 	if f.Name == "" {
-		return errors.New("过滤器名称不能为空")
+		return &condition.ValidationError{Path: "name", Message: "过滤器名称不能为空"}
+	}
+	if utf8.RuneCountInString(f.Name) > 100 {
+		return &condition.ValidationError{Path: "name", Message: "名称不能超过 100 个字符"}
+	}
+	if utf8.RuneCountInString(f.Description) > 2000 {
+		return &condition.ValidationError{Path: "description", Message: "说明不能超过 2000 个字符"}
 	}
 	if len(f.Conditions) == 0 {
-		return errors.New("过滤器至少需要一个匹配条件")
+		return &condition.ValidationError{Path: "conditions", Message: "过滤器至少需要一个匹配条件"}
 	}
 	_, err := condition.Compile(f.Conditions)
 	return err

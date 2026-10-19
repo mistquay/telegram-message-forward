@@ -584,16 +584,14 @@ func normalizeFilterIDs(ids []int64, legacy int64) []int64 {
 	out := make([]int64, 0, len(ids))
 	seen := map[int64]struct{}{}
 	for _, id := range ids {
-		if id <= 0 {
-			continue
-		}
+		// Keep invalid IDs visible so the evaluator rejects them instead of dropping a restriction.
 		if _, ok := seen[id]; ok {
 			continue
 		}
 		seen[id] = struct{}{}
 		out = append(out, id)
 	}
-	if len(out) == 0 && legacy > 0 {
+	if len(out) == 0 && legacy != 0 {
 		out = append(out, legacy)
 	}
 	return out

@@ -51,8 +51,14 @@ func init() {
 				Required: true,
 				Options: []formschema.Option{
 					{Label: "文本", Value: "text"},
-					{Label: "图片", Value: "photo"},
-					{Label: "文档", Value: "document"},
+					{Label: "照片（压缩图）", Value: "photo"},
+					{Label: "图片文件", Value: "image"},
+					{Label: "所有图片", Value: "image_any"},
+					{Label: "文档及音视频（兼容旧配置）", Value: "document"},
+					{Label: "普通文件（不含音视频）", Value: "file"},
+					{Label: "视频", Value: "video"},
+					{Label: "音频", Value: "audio"},
+					{Label: "语音", Value: "voice"},
 					{Label: "位置", Value: "geo"},
 					{Label: "联系人", Value: "contact"},
 					{Label: "投票", Value: "poll"},
@@ -72,7 +78,7 @@ func init() {
 	RegisterWithDescriptor("sender", senderCondition{}, Descriptor{
 		Type:        "sender",
 		Label:       "发送者",
-		Description: "按发送者类型、ID 或名称匹配。",
+		Description: "发送者类型、ID、名称按 AND 组合；每项多个值为任一。",
 		Fields: []formschema.FieldSpec{
 			{
 				Key:   "peer_types",
@@ -82,6 +88,8 @@ func init() {
 					{Label: "用户", Value: "user"},
 					{Label: "普通群", Value: "chat"},
 					{Label: "频道/超级群", Value: "channel"},
+					{Label: "RSS", Value: "rss"},
+					{Label: "Webhook", Value: "webhook"},
 				},
 			},
 			{Key: "sender_ids", Label: "发送者 ID", Type: formschema.FieldStringList, Placeholder: "逐行输入 sender_id"},
@@ -119,7 +127,9 @@ func init() {
 				Options: []formschema.Option{
 					{Label: "图片", Value: "image"},
 					{Label: "照片", Value: "photo"},
-					{Label: "文件", Value: "document"},
+					{Label: "所有图片", Value: "image_any"},
+					{Label: "文档及音视频（兼容旧配置）", Value: "document"},
+					{Label: "普通文件（不含音视频）", Value: "file"},
 					{Label: "音频", Value: "audio"},
 					{Label: "语音", Value: "voice"},
 					{Label: "视频", Value: "video"},
@@ -231,7 +241,11 @@ func (messageType) Evaluate(_ context.Context, msg *domainmessage.NormalizedMess
 		return true, nil
 	}
 	for _, t := range types {
-		if t == msg.MessageType {
+		actual := msg.MessageType
+		if actual == "document" && len(msg.Media) > 0 {
+			actual = effectiveMediaType(msg.Media[0])
+		}
+		if matchesMediaType(actual, t) {
 			return true, nil
 		}
 	}
@@ -349,11 +363,40 @@ func (mediaType) Evaluate(_ context.Context, msg *domainmessage.NormalizedMessag
 		return true, nil
 	}
 	for _, item := range msg.Media {
-		if stringIn(item.Type, types) {
-			return true, nil
+		for _, typ := range types {
+			if matchesMediaType(effectiveMediaType(item), typ) {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
+}
+
+// Telegram previously represented audio/video as document. Keep that broad legacy selector.
+func matchesMediaType(actual, want string) bool {
+	if want == "document" {
+		return stringIn(actual, []string{"document", "audio", "video", "voice"})
+	}
+	if want == "file" {
+		return actual == "document"
+	}
+	if want == "image_any" {
+		return actual == "photo" || actual == "image"
+	}
+	return actual == want
+}
+
+func effectiveMediaType(item domainmessage.Media) string {
+	if item.Type == "document" {
+		mime := strings.ToLower(item.MimeType)
+		if strings.HasPrefix(mime, "video/") {
+			return "video"
+		}
+		if strings.HasPrefix(mime, "audio/") {
+			return "audio"
+		}
+	}
+	return item.Type
 }
 
 type messageLength struct{}

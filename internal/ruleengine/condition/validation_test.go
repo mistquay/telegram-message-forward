@@ -18,7 +18,7 @@ func TestInvalidConfigCannotSaveOrExecute(t *testing.T) {
 		{"keyword_contains", map[string]any{"keywords": []string{"go"}, "case_sensitive": "false"}},
 		{"message_length", map[string]any{"min": 10, "max": 2}},
 		{"message_length", map[string]any{"min": -1}},
-		{"message_type", map[string]any{"types": []string{"invalid"}}},
+		{"message_type", map[string]any{"types": []any{42}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.typ, func(t *testing.T) {

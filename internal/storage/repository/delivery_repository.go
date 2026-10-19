@@ -54,6 +54,7 @@ func (r *DeliveryRepository) Create(ctx context.Context, t *domaindelivery.Task)
 		}
 		if res.RowsAffected > 0 {
 			t.ID = m.ID
+			t.CreationDisposition = "created"
 			return nil
 		}
 		var existing model.DeliveryTask
@@ -64,12 +65,14 @@ func (r *DeliveryRepository) Create(ctx context.Context, t *domaindelivery.Task)
 			return qerr
 		}
 		t.ID = existing.ID
+		t.CreationDisposition = "duplicate"
 		return nil
 	default:
 		if err := r.db.WithContext(ctx).Create(m).Error; err != nil {
 			return err
 		}
 		t.ID = m.ID
+		t.CreationDisposition = "created"
 		return nil
 	}
 }
@@ -273,9 +276,9 @@ func (r *DeliveryRepository) ListFlowRoutesByMessage(ctx context.Context, messag
 	}
 	var routes []domaindelivery.FlowRoute
 	err := r.db.WithContext(ctx).Table("delivery_tasks").
-		Select("sink_id, template_id, origin_id, origin_node_id").
+		Select("sink_id, origin_id, origin_node_id").
 		Where("message_id = ? AND origin_type = 'flow'", messageID).
-		Group("sink_id, template_id, origin_id, origin_node_id").
+		Group("sink_id, origin_id, origin_node_id").
 		Order("origin_id, origin_node_id, sink_id").
 		Scan(&routes).Error
 	if err != nil {

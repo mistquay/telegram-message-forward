@@ -15,6 +15,7 @@ import (
 type Queue struct {
 	tasks       domaindelivery.Repository
 	sinks       domainsink.Repository
+	routing     domainsink.RoutingReader
 	maxAttempts int
 	notifier    *Notifier
 }
@@ -37,6 +38,20 @@ func (q *Queue) UseSinks(sinks domainsink.Repository) *Queue {
 	return q
 }
 
+// WithTasks creates a transaction-bound queue. Wake workers only after commit.
+func (q *Queue) WithTasks(tasks domaindelivery.Repository, reader domainsink.RoutingReader) *Queue {
+	return &Queue{tasks: tasks, routing: reader, maxAttempts: q.maxAttempts}
+}
+
+func (q *Queue) NotifyCommitted(targets []decision.Target) {
+	for _, target := range targets {
+		if target.Status == "enqueued" {
+			q.notifier.Notify()
+			return
+		}
+	}
+}
+
 // Enqueue 为每个 Flow 命中的每个目标渠道生成一个 pending 投递任务。
 //
 // Flow 任务按 (message_id, origin_type, origin_id, origin_node_id, message_revision) 幂等。
@@ -56,6 +71,7 @@ func (q *Queue) EnqueueDetailed(ctx context.Context, msg *domainmessage.Normaliz
 		for _, target := range m.Targets {
 			enabled, err := q.sinkEnabled(ctx, target.SinkID, enabledSinks)
 			if err != nil {
+				out = append(out, decision.Target{FlowID: m.OriginID, NodeID: m.OriginNodeID, SinkID: target.SinkID, Status: "error", Reason: "sink_lookup_failed"})
 				return out, err
 			}
 			if !enabled {
@@ -75,10 +91,12 @@ func (q *Queue) EnqueueDetailed(ctx context.Context, msg *domainmessage.Normaliz
 				MessageSnapshot: m.Message,
 			}
 			if err := q.tasks.Create(ctx, task); err != nil {
+				out = append(out, decision.Target{FlowID: m.OriginID, NodeID: m.OriginNodeID, SinkID: target.SinkID, Status: "error", Reason: "enqueue_failed"})
 				return out, err
 			}
-			out = append(out, decision.Target{FlowID: m.OriginID, NodeID: m.OriginNodeID, SinkID: target.SinkID, TaskID: task.ID, Status: "enqueued"})
-			created = true
+			status := taskDisposition(task)
+			out = append(out, decision.Target{FlowID: m.OriginID, NodeID: m.OriginNodeID, SinkID: target.SinkID, TaskID: task.ID, Status: status})
+			created = created || status == "enqueued"
 		}
 	}
 	if created {
@@ -103,14 +121,21 @@ func (q *Queue) EnqueueEditDetailed(ctx context.Context, msg *domainmessage.Norm
 	}
 	created := false
 	enabledSinks := map[int64]bool{}
+	seenRoutes := map[[3]int64]bool{}
 	for _, route := range routes {
-		candidate := matchMessageForRoute(matches, route)
+		key := [3]int64{route.OriginID, route.OriginNodeID, route.SinkID}
+		if seenRoutes[key] {
+			continue
+		}
+		seenRoutes[key] = true
+		candidate, currentTarget := matchMessageForRoute(matches, route)
 		if candidate == nil {
 			out = append(out, decision.Target{FlowID: route.OriginID, NodeID: route.OriginNodeID, SinkID: route.SinkID, Status: "skipped", Reason: "edit_route_not_matched"})
 			continue
 		}
 		enabled, err := q.sinkEnabled(ctx, route.SinkID, enabledSinks)
 		if err != nil {
+			out = append(out, decision.Target{FlowID: route.OriginID, NodeID: route.OriginNodeID, SinkID: route.SinkID, Status: "error", Reason: "sink_lookup_failed"})
 			return out, err
 		}
 		if !enabled {
@@ -123,7 +148,7 @@ func (q *Queue) EnqueueEditDetailed(ctx context.Context, msg *domainmessage.Norm
 		task := &domaindelivery.Task{
 			MessageID:       msg.ID,
 			SinkID:          route.SinkID,
-			TemplateID:      route.TemplateID,
+			TemplateID:      currentTarget.TemplateID,
 			OriginType:      "flow",
 			OriginID:        route.OriginID,
 			OriginNodeID:    route.OriginNodeID,
@@ -134,10 +159,12 @@ func (q *Queue) EnqueueEditDetailed(ctx context.Context, msg *domainmessage.Norm
 			MessageSnapshot: &snapshot,
 		}
 		if err := q.tasks.Create(ctx, task); err != nil {
+			out = append(out, decision.Target{FlowID: route.OriginID, NodeID: route.OriginNodeID, SinkID: route.SinkID, Status: "error", Reason: "enqueue_failed"})
 			return out, err
 		}
-		out = append(out, decision.Target{FlowID: route.OriginID, NodeID: route.OriginNodeID, SinkID: route.SinkID, TaskID: task.ID, Status: "enqueued"})
-		created = true
+		status := taskDisposition(task)
+		out = append(out, decision.Target{FlowID: route.OriginID, NodeID: route.OriginNodeID, SinkID: route.SinkID, TaskID: task.ID, Status: status})
+		created = created || status == "enqueued"
 	}
 	if created {
 		q.notifier.Notify()
@@ -145,28 +172,45 @@ func (q *Queue) EnqueueEditDetailed(ctx context.Context, msg *domainmessage.Norm
 	return out, nil
 }
 
-func matchMessageForRoute(matches []domainflow.Match, route domaindelivery.FlowRoute) *domainmessage.NormalizedMessage {
+func taskDisposition(task *domaindelivery.Task) string {
+	if task.CreationDisposition == "duplicate" {
+		return "deduplicated"
+	}
+	return "enqueued"
+}
+
+func matchMessageForRoute(matches []domainflow.Match, route domaindelivery.FlowRoute) (*domainmessage.NormalizedMessage, *domainflow.Target) {
 	for _, match := range matches {
 		if match.OriginID != route.OriginID || match.OriginNodeID != route.OriginNodeID {
 			continue
 		}
 		for _, target := range match.Targets {
 			if target.SinkID == route.SinkID {
-				return match.Message
+				return match.Message, &target
 			}
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func (q *Queue) sinkEnabled(ctx context.Context, sinkID int64, cache map[int64]bool) (bool, error) {
-	if q.sinks == nil {
+	if q.sinks == nil && q.routing == nil {
 		return true, nil
 	}
 	if enabled, ok := cache[sinkID]; ok {
 		return enabled, nil
 	}
-	sink, err := q.sinks.GetByID(ctx, sinkID)
+	reader := q.routing
+	if reader == nil {
+		reader, _ = q.sinks.(domainsink.RoutingReader)
+	}
+	var sink *domainsink.Sink
+	var err error
+	if reader != nil {
+		sink, err = reader.GetRoutingInfo(ctx, sinkID)
+	} else {
+		sink, err = q.sinks.GetByID(ctx, sinkID)
+	}
 	if err != nil {
 		return false, err
 	}

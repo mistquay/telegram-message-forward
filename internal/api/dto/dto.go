@@ -6,6 +6,7 @@ package dto
 
 import (
 	"encoding/json"
+	"telegram-message-forward/internal/domain/decision"
 	"time"
 
 	appdelivery "telegram-message-forward/internal/app/delivery"
@@ -419,6 +420,9 @@ type TemplatePreviewDTO struct {
 }
 
 type RulePreviewMessageRequest struct {
+	Links          []domainmessage.Link  `json:"links,omitempty"`
+	SentAt         *time.Time            `json:"sent_at,omitempty"`
+	ReceivedAt     time.Time             `json:"received_at,omitempty"`
 	SourceID       int64                 `json:"source_id"`
 	MessageType    string                `json:"message_type"`
 	SenderPeerType string                `json:"sender_peer_type"`
@@ -429,12 +433,22 @@ type RulePreviewMessageRequest struct {
 	OriginalURL    string                `json:"original_url,omitempty"`
 }
 
+func (r RulePreviewMessageRequest) ToMessage() *domainmessage.NormalizedMessage {
+	return &domainmessage.NormalizedMessage{SourceID: r.SourceID, MessageType: r.MessageType, SenderPeerType: r.SenderPeerType, SenderID: r.SenderID, SenderName: r.SenderName, Text: r.Text, Media: r.Media, Links: r.Links, OriginalURL: r.OriginalURL, SentAt: r.SentAt, ReceivedAt: r.ReceivedAt}
+}
+
 type RulePreviewTargetDTO struct {
-	SinkID     int64  `json:"sink_id"`
-	TemplateID *int64 `json:"template_id,omitempty"`
+	FlowID     int64                 `json:"flow_id,omitempty"`
+	NodeID     int64                 `json:"node_id,omitempty"`
+	Text       string                `json:"text"`
+	Media      []domainmessage.Media `json:"media,omitempty"`
+	Status     string                `json:"status"`
+	SinkID     int64                 `json:"sink_id"`
+	TemplateID *int64                `json:"template_id,omitempty"`
 }
 
 type RulePreviewDTO struct {
+	Evaluation    decision.Evaluation    `json:"evaluation"`
 	Matched       bool                   `json:"matched"`
 	ProcessedText string                 `json:"processed_text"`
 	Media         []domainmessage.Media  `json:"media,omitempty"`
@@ -481,8 +495,12 @@ type FlowRequest struct {
 }
 
 type FlowPreviewRequest struct {
-	Flow    FlowRequest               `json:"flow" binding:"required"`
-	Message RulePreviewMessageRequest `json:"message" binding:"required"`
+	FlowID    int64                     `json:"flow_id"`
+	MessageID int64                     `json:"message_id"`
+	FullChain bool                      `json:"full_chain"`
+	Edit      bool                      `json:"edit"`
+	Flow      FlowRequest               `json:"flow" binding:"required"`
+	Message   RulePreviewMessageRequest `json:"message"`
 }
 
 func NewFlowDTO(f *domainflow.Flow) FlowDTO {

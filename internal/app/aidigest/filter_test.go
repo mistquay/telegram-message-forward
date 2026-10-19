@@ -38,3 +38,13 @@ func TestAIHonorsSharedSourceCondition(t *testing.T) {
 		t.Fatalf("AI 不应跳过共享来源条件 passed=%v err=%v", passed, err)
 	}
 }
+
+func TestInvalidSharedIDsCannotNormalizeIntoUnfilteredAIInput(t *testing.T) {
+	s := NewService(Deps{Filters: failingFilterRepo{}})
+	for _, profile := range []*domainaidigest.Profile{{FilterIDs: []int64{0}}, {FilterIDs: []int64{1, 0}}, {FilterID: -1}} {
+		_, included, err := s.filterMessages(context.Background(), profile, 1, []*domainmessage.NormalizedMessage{{ID: 1, Text: "urgent spam"}})
+		if err == nil || len(included) != 0 {
+			t.Fatalf("非法引用不能被清空后降级为无条件AI输入: %+v %v", profile, err)
+		}
+	}
+}

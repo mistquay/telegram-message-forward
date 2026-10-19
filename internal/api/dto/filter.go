@@ -10,6 +10,7 @@ import (
 
 // FilterDTO 是过滤器响应。
 type FilterDTO struct {
+	Stats       domainfilter.Stats           `json:"stats"`
 	Revision    int                          `json:"revision"`
 	ID          int64                        `json:"id"`
 	Name        string                       `json:"name"`
@@ -37,6 +38,7 @@ func NewFilterDTO(f *domainfilter.Filter) FilterDTO {
 
 // FilterRequest 是过滤器创建/更新请求。
 type FilterRequest struct {
+	Revision    int                          `json:"revision"`
 	Name        string                       `json:"name" binding:"required"`
 	Description string                       `json:"description"`
 	Conditions  []domainflow.ConditionConfig `json:"conditions"`
@@ -44,8 +46,21 @@ type FilterRequest struct {
 
 func (r FilterRequest) ToInput() appfilter.Input {
 	return appfilter.Input{
+		Revision:    r.Revision,
 		Name:        r.Name,
 		Description: r.Description,
 		Conditions:  r.Conditions,
 	}
+}
+
+type FilterPreviewRequest struct {
+	Conditions []domainflow.ConditionConfig `json:"conditions" binding:"required"`
+	CompareID  int64                        `json:"compare_id"`
+	Message    *RulePreviewMessageRequest   `json:"message"`
+	MessageID  int64                        `json:"message_id"`
+	SourceID   int64                        `json:"source_id"`
+	From       *time.Time                   `json:"from"`
+	To         *time.Time                   `json:"to"`
+	BeforeID   int64                        `json:"before_id"`
+	Limit      int                          `json:"limit"`
 }

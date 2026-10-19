@@ -31,24 +31,26 @@ const (
 
 // Task 是一个投递任务。
 type Task struct {
-	ID              int64
-	MessageID       int64
-	RuleID          int64
-	SinkID          int64
-	TemplateID      *int64
-	OriginType      string
-	OriginID        int64
-	OriginNodeID    int64
-	Status          Status
-	AttemptCount    int
-	MaxAttempts     int
-	NextRetryAt     *time.Time
-	LockedAt        *time.Time
-	LockedBy        string
-	LastError       string
-	MessageRevision int
-	TextSuffix      string
-	Progress        map[string]bool
+	// CreationDisposition is an ephemeral Create result: created or duplicate.
+	CreationDisposition string `json:"-"`
+	ID                  int64
+	MessageID           int64
+	RuleID              int64
+	SinkID              int64
+	TemplateID          *int64
+	OriginType          string
+	OriginID            int64
+	OriginNodeID        int64
+	Status              Status
+	AttemptCount        int
+	MaxAttempts         int
+	NextRetryAt         *time.Time
+	LockedAt            *time.Time
+	LockedBy            string
+	LastError           string
+	MessageRevision     int
+	TextSuffix          string
+	Progress            map[string]bool
 	// MessageSnapshot 是 Flow/AI 产出的消息快照；为空时按 MessageID 读取原始消息。
 	MessageSnapshot *domainmessage.NormalizedMessage
 	CreatedAt       time.Time

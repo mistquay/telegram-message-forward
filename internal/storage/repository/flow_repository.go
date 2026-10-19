@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	domainflow "telegram-message-forward/internal/domain/flow"
 	"telegram-message-forward/internal/storage/model"
@@ -29,7 +30,7 @@ func (r *FlowRepository) Create(ctx context.Context, f *domainflow.Flow) error {
 			return err
 		}
 		f.ID = m.ID
-		if err := r.replaceGraph(tx, f); err != nil {
+		if err := r.replaceGraph(tx, f, nil); err != nil {
 			return err
 		}
 		loaded, err := r.getByIDTx(tx.WithContext(ctx), f.ID)
@@ -44,16 +45,38 @@ func (r *FlowRepository) Create(ctx context.Context, f *domainflow.Flow) error {
 func (r *FlowRepository) Update(ctx context.Context, f *domainflow.Flow) error {
 	m := toFlowModel(f)
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var locked model.Flow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&locked, f.ID).Error; err != nil {
+			return err
+		}
+		var ownedNodes []model.FlowNode
+		if err := tx.Where("flow_id = ?", f.ID).Find(&ownedNodes).Error; err != nil {
+			return err
+		}
+		owned := map[int64]bool{}
+		for _, n := range ownedNodes {
+			owned[n.ID] = true
+		}
 		if err := tx.Save(m).Error; err != nil {
 			return err
 		}
 		if err := tx.Where("flow_id = ?", f.ID).Delete(&model.FlowEdge{}).Error; err != nil {
 			return err
 		}
-		if err := tx.Where("flow_id = ?", f.ID).Delete(&model.FlowNode{}).Error; err != nil {
+		retained := []int64{}
+		for _, node := range f.Nodes {
+			if owned[node.ID] {
+				retained = append(retained, node.ID)
+			}
+		}
+		obsolete := tx.Where("flow_id = ?", f.ID)
+		if len(retained) > 0 {
+			obsolete = obsolete.Where("id NOT IN ?", retained)
+		}
+		if err := obsolete.Delete(&model.FlowNode{}).Error; err != nil {
 			return err
 		}
-		if err := r.replaceGraph(tx, f); err != nil {
+		if err := r.replaceGraph(tx, f, owned); err != nil {
 			return err
 		}
 		loaded, err := r.getByIDTx(tx.WithContext(ctx), f.ID)
@@ -95,7 +118,7 @@ func (r *FlowRepository) Delete(ctx context.Context, id int64) error {
 	return r.db.WithContext(ctx).Delete(&model.Flow{}, id).Error
 }
 
-func (r *FlowRepository) replaceGraph(tx *gorm.DB, f *domainflow.Flow) error {
+func (r *FlowRepository) replaceGraph(tx *gorm.DB, f *domainflow.Flow, owned map[int64]bool) error {
 	oldToNew := map[int64]int64{}
 	for i := range f.Nodes {
 		n := f.Nodes[i]
@@ -106,8 +129,16 @@ func (r *FlowRepository) replaceGraph(tx *gorm.DB, f *domainflow.Flow) error {
 		}
 		oldID := n.ID
 		m.ID = 0
-		if err := tx.Create(m).Error; err != nil {
-			return err
+		// Preserve identities of retained nodes so edit history and decision links stay valid.
+		if owned[oldID] {
+			m.ID = oldID
+			if err := tx.Save(m).Error; err != nil {
+				return err
+			}
+		} else {
+			if err := tx.Create(m).Error; err != nil {
+				return err
+			}
 		}
 		f.Nodes[i].ID = m.ID
 		f.Nodes[i].FlowID = f.ID

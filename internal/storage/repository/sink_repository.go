@@ -65,6 +65,20 @@ func (r *SinkRepository) GetByID(ctx context.Context, id int64) (*domainsink.Sin
 	return s, nil
 }
 
+func (r *SinkRepository) GetRoutingInfo(ctx context.Context, id int64) (*domainsink.Sink, error) {
+	var m model.Sink
+	if err := r.db.WithContext(ctx).Select("id", "type", "name", "enabled", "capabilities").First(&m, id).Error; err != nil {
+		return nil, err
+	}
+	var capabilities domainsink.Capabilities
+	if len(m.Capabilities) > 0 {
+		if err := json.Unmarshal(m.Capabilities, &capabilities); err != nil {
+			return nil, err
+		}
+	}
+	return &domainsink.Sink{ID: m.ID, Type: m.Type, Name: m.Name, Enabled: m.Enabled, Capabilities: capabilities}, nil
+}
+
 // List 返回全部渠道。
 func (r *SinkRepository) List(ctx context.Context) ([]*domainsink.Sink, error) {
 	var ms []model.Sink

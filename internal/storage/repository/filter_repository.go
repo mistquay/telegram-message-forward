@@ -81,7 +81,7 @@ func (r *FilterRepository) Update(ctx context.Context, f *domainfilter.Filter) e
 			return err
 		}
 		if f.Revision > 0 && f.Revision != existing.Revision {
-			return fmt.Errorf("过滤器已被其他操作修改，请刷新后重试")
+			return fmt.Errorf("%w，请刷新后重试", domainfilter.ErrConflict)
 		}
 		f.Revision = existing.Revision + 1
 		if err := tx.Model(&model.Filter{}).Where("id = ?", f.ID).Updates(map[string]any{
@@ -110,14 +110,14 @@ func (r *FilterRepository) CountReferences(ctx context.Context, id int64) (int64
 	if err := r.db.WithContext(ctx).
 		Model(&model.FlowNode{}).
 		Where("type = ?", string(domainflow.NodeTypeFilter)).
-		Where("COALESCE(config->'filter_ids', '[]'::jsonb) @> jsonb_build_array(?)", id).
+		Where("COALESCE(config->'filter_ids', '[]'::jsonb) @> jsonb_build_array(?::bigint)", id).
 		Count(&flowCount).Error; err != nil {
 		return 0, err
 	}
 	var profileCount int64
 	// 兼容旧 filter_id 与新 filter_ids jsonb 数组。
 	if err := r.db.WithContext(ctx).Model(&model.AIDigestProfile{}).
-		Where("filter_id = ? OR COALESCE(filter_ids, '[]'::jsonb) @> jsonb_build_array(?)", id, id).
+		Where("filter_id = ? OR COALESCE(filter_ids, '[]'::jsonb) @> jsonb_build_array(?::bigint)", id, id).
 		Count(&profileCount).Error; err != nil {
 		return 0, err
 	}

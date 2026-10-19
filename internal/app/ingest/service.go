@@ -11,8 +11,10 @@ import (
 
 	"telegram-message-forward/internal/dispatch"
 	"telegram-message-forward/internal/domain/decision"
+	domaindelivery "telegram-message-forward/internal/domain/delivery"
 	domainflow "telegram-message-forward/internal/domain/flow"
 	domainmessage "telegram-message-forward/internal/domain/message"
+	domainsink "telegram-message-forward/internal/domain/sink"
 	"telegram-message-forward/internal/flowengine"
 	"telegram-message-forward/internal/infra/clock"
 	"telegram-message-forward/internal/infra/mediastore"
@@ -25,15 +27,25 @@ type sourceCursor interface {
 
 // Service 是消息 ingest 应用服务。
 type Service struct {
-	messages   domainmessage.Repository
-	flows      domainflow.Repository
-	flowEngine *flowengine.Engine
-	queue      *dispatch.Queue
-	clock      clock.Clock
-	log        *slog.Logger
-	media      mediastore.Store
-	cursors    sourceCursor
-	decisions  decision.Repository
+	messages    domainmessage.Repository
+	flows       domainflow.Repository
+	flowEngine  *flowengine.Engine
+	queue       *dispatch.Queue
+	clock       clock.Clock
+	log         *slog.Logger
+	media       mediastore.Store
+	cursors     sourceCursor
+	decisions   decision.Repository
+	transaction ProcessingTransaction
+}
+
+type ProcessingTransaction interface {
+	Within(context.Context, func(domaindelivery.Repository, decision.Repository, domainsink.RoutingReader) error) error
+}
+
+func (s *Service) UseProcessingTransaction(tx ProcessingTransaction) *Service {
+	s.transaction = tx
+	return s
 }
 
 // NewService 创建 ingest 服务。
@@ -144,35 +156,80 @@ func (s *Service) process(ctx context.Context, msg *domainmessage.NormalizedMess
 		trigger = "edit"
 	}
 	if err == nil {
-		if edit {
-			result.Targets, err = s.queue.EnqueueEditDetailed(ctx, msg, matches, msg.EditTextSuffix)
-		} else if len(matches) > 0 {
-			result.Targets, err = s.queue.EnqueueDetailed(ctx, msg, matches)
+		work := func(queue *dispatch.Queue, records decision.Repository) error {
+			enqueueErr := enqueue(ctx, queue, msg, matches, edit, &result)
+			return errors.Join(enqueueErr, saveDecision(ctx, records, msg, trigger, result))
 		}
-		if err != nil {
-			result.Status, result.Reason = "error", "enqueue_failed"
-		} else if len(result.Targets) > 0 {
-			result.Status = "not_enqueued"
-			for _, target := range result.Targets {
-				if target.Status == "enqueued" {
-					result.Status = "enqueued"
-					break
+		if s.transaction != nil {
+			workFailed := false
+			workStarted := false
+			err = s.transaction.Within(ctx, func(tasks domaindelivery.Repository, records decision.Repository, reader domainsink.RoutingReader) error {
+				workStarted = true
+				workErr := work(s.queue.WithTasks(tasks, reader), records)
+				workFailed = workErr != nil
+				return workErr
+			})
+			if err == nil {
+				s.queue.NotifyCommitted(result.Targets)
+			} else {
+				result.Status, result.Reason = "error", "dispatch_commit_unknown"
+				if workFailed {
+					result.Reason = "dispatch_rolled_back"
 				}
+				if !workStarted {
+					result.Reason = "dispatch_not_started"
+				}
+				for i := range result.Targets {
+					if result.Targets[i].Status == "enqueued" {
+						result.Targets[i].Status = "commit_unknown"
+						if workFailed {
+							result.Targets[i].Status = "rolled_back"
+							result.Targets[i].TaskID = 0
+						}
+					}
+				}
+				err = errors.Join(err, saveDecision(ctx, s.decisions, msg, trigger, result))
 			}
+		} else {
+			err = work(s.queue, s.decisions)
 		}
-	}
-	if s.decisions != nil {
-		revision := msg.ContentRevision
-		if revision <= 0 {
-			revision = 1
-		}
-		record := &decision.Record{MessageID: msg.ID, SourceID: msg.SourceID, MessageRevision: revision, Trigger: trigger, Evaluation: result}
-		if saveErr := s.decisions.Create(ctx, record); saveErr != nil {
-			err = errors.Join(err, saveErr)
-		}
+	} else {
+		err = errors.Join(err, saveDecision(ctx, s.decisions, msg, trigger, result))
 	}
 	s.log.Info("消息处理完成", "message_id", msg.ID, "source_id", msg.SourceID, "revision", msg.ContentRevision, "trigger", trigger, "result", result.Status)
 	return err
+}
+
+func enqueue(ctx context.Context, queue *dispatch.Queue, msg *domainmessage.NormalizedMessage, matches []domainflow.Match, edit bool, result *decision.Evaluation) error {
+	var err error
+	if edit {
+		result.Targets, err = queue.EnqueueEditDetailed(ctx, msg, matches, msg.EditTextSuffix)
+	} else if len(matches) > 0 {
+		result.Targets, err = queue.EnqueueDetailed(ctx, msg, matches)
+	}
+	if err != nil {
+		result.Status, result.Reason = "error", "enqueue_failed"
+	} else if len(result.Targets) > 0 {
+		result.Status = "not_enqueued"
+		for _, target := range result.Targets {
+			if target.Status == "enqueued" {
+				result.Status = "enqueued"
+				break
+			}
+		}
+	}
+	return err
+}
+
+func saveDecision(ctx context.Context, repo decision.Repository, msg *domainmessage.NormalizedMessage, trigger string, result decision.Evaluation) error {
+	if repo == nil {
+		return nil
+	}
+	revision := msg.ContentRevision
+	if revision <= 0 {
+		revision = 1
+	}
+	return repo.Create(ctx, &decision.Record{MessageID: msg.ID, SourceID: msg.SourceID, MessageRevision: revision, Trigger: trigger, Evaluation: result})
 }
 
 // persistMedia 把 Source 下载到临时目录的媒体文件移入媒体存储，

@@ -157,8 +157,14 @@ func NewRouter(deps Deps) *gin.Engine {
 			filters := v1.Group("/filters")
 			{
 				filters.GET("", deps.Filter.List)
+				filters.POST("/preview", deps.Filter.Preview)
+				filters.POST("/validate", deps.Filter.Validate)
 				filters.POST("", deps.Filter.Create)
 				filters.GET("/:id", deps.Filter.Get)
+				filters.GET("/:id/references", deps.Filter.References)
+				filters.GET("/:id/versions", deps.Filter.Versions)
+				filters.GET("/:id/versions/:revision", deps.Filter.Version)
+				filters.GET("/:id/decisions", deps.Filter.Decisions)
 				filters.PUT("/:id", deps.Filter.Update)
 				filters.DELETE("/:id", deps.Filter.Delete)
 			}

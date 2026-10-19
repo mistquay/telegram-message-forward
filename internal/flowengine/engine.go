@@ -3,6 +3,10 @@ package flowengine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -110,18 +114,24 @@ func (e *Engine) EvaluateDetailed(ctx context.Context, msg *domainmessage.Normal
 	snapshot, resolveErr := filterset.Resolve(ctx, e.filters, ids)
 	if resolveErr != nil {
 		result.Reason = "filter_resolution_failed"
+		var resolution *filterset.ResolutionError
+		errors.As(resolveErr, &resolution)
 		for _, f := range ordered {
 			if f == nil || !f.Enabled {
 				continue
 			}
-			trace := decision.Flow{ID: f.ID, Name: f.Name, Version: f.UpdatedAt.UTC().Format(time.RFC3339Nano), Status: "error", Reason: "filter_resolution_failed", Nodes: []decision.Node{}}
+			trace := decision.Flow{ID: f.ID, Name: f.Name, Version: flowVersion(f), Status: "error", Reason: "filter_resolution_failed", Nodes: []decision.Node{}}
 			for _, n := range f.Nodes {
 				if len(n.Config.FilterIDs) == 0 {
 					continue
 				}
 				step := decision.Node{NodeID: n.ID, Type: "filter", Status: "error", Reason: "filter_resolution_failed"}
 				for _, id := range n.Config.FilterIDs {
-					step.Filters = append(step.Filters, decision.Filter{ID: id, Result: decision.Condition{Type: "all", Status: "error", Reason: "filter_resolution_failed"}})
+					status, reason := "error", "filter_resolution_failed"
+					if resolution != nil && resolution.ID > 0 && resolution.ID != id {
+						status, reason = "skipped", "filter_resolution_aborted"
+					}
+					step.Filters = append(step.Filters, decision.Filter{ID: id, Result: decision.Condition{Type: "all", Status: status, Reason: reason}})
 				}
 				trace.Nodes = append(trace.Nodes, step)
 			}
@@ -131,12 +141,18 @@ func (e *Engine) EvaluateDetailed(ctx context.Context, msg *domainmessage.Normal
 	}
 	stopped := false
 	for _, f := range ordered {
+		if err := ctx.Err(); err != nil {
+			return nil, result, err
+		}
 		if f == nil || !f.Enabled {
 			continue
 		}
-		trace := decision.Flow{ID: f.ID, Name: f.Name, Version: f.UpdatedAt.UTC().Format(time.RFC3339Nano), Nodes: []decision.Node{}, Status: "skipped"}
+		trace := decision.Flow{ID: f.ID, Name: f.Name, Version: flowVersion(f), Nodes: []decision.Node{}, Status: "skipped"}
 		if stopped {
 			trace.Reason = "stop_on_match"
+			for _, node := range f.Nodes {
+				trace.Nodes = append(trace.Nodes, skippedNode(node, snapshot, "stop_on_match"))
+			}
 			result.Flows = append(result.Flows, trace)
 			continue
 		}
@@ -322,6 +338,9 @@ func reachableFrom(p *Plan, start int64, exclude map[int64]bool) map[int64]bool 
 }
 
 func (e *Engine) compileCached(f *domainflow.Flow) (*Plan, error) {
+	if f.UpdatedAt.IsZero() {
+		return e.Compile(f)
+	}
 	e.mu.Lock()
 	if cached, ok := e.cache[f.ID]; ok && cached.updatedAt.Equal(f.UpdatedAt) {
 		e.mu.Unlock()
@@ -339,6 +358,18 @@ func (e *Engine) compileCached(f *domainflow.Flow) (*Plan, error) {
 	return plan, nil
 }
 
+func flowVersion(f *domainflow.Flow) string {
+	if !f.UpdatedAt.IsZero() {
+		return f.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	data, err := json.Marshal(f)
+	if err != nil {
+		return "draft"
+	}
+	hash := sha256.Sum256(data)
+	return "draft:" + hex.EncodeToString(hash[:8])
+}
+
 func validateNode(n domainflow.Node) error {
 	switch n.Type {
 	case domainflow.NodeTypeSource:
@@ -350,6 +381,9 @@ func validateNode(n domainflow.Node) error {
 			return fmt.Errorf("target 节点缺少有效 ref_id: node=%d", n.ID)
 		}
 	case domainflow.NodeTypeFilter:
+		if len(n.Config.FilterIDs) > filterset.MaxReferences {
+			return fmt.Errorf("过滤节点最多引用 %d 个共享过滤器", filterset.MaxReferences)
+		}
 		if len(n.Config.FilterIDs) > 0 && len(n.Config.Conditions) > 0 {
 			return fmt.Errorf("filter 节点 filter_ids 与 conditions 只能二选一: node=%d", n.ID)
 		}
@@ -438,6 +472,7 @@ func reachesTarget(p *Plan, id int64, seen map[int64]bool) bool {
 }
 
 type evalState struct {
+	fromID int64
 	nodeID int64
 	msg    *domainmessage.NormalizedMessage
 }
@@ -455,6 +490,9 @@ func (e *Engine) evaluatePlan(ctx context.Context, msg *domainmessage.Normalized
 	var matches []domainflow.Match
 	visited := map[int64]bool{}
 	for len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if len(trace.Nodes) >= 512 {
 			return nil, fmt.Errorf("Flow 执行路径超过 512 步")
 		}
@@ -462,7 +500,10 @@ func (e *Engine) evaluatePlan(ctx context.Context, msg *domainmessage.Normalized
 		queue = queue[1:]
 		node := p.nodes[state.nodeID]
 		visited[node.ID] = true
-		step := decision.Node{NodeID: node.ID, Type: string(node.Type), Status: "passed"}
+		step := decision.Node{NodeID: node.ID, FromNodeID: state.fromID, Type: string(node.Type), Status: "passed"}
+		if node.Type == domainflow.NodeTypeFilter && len(node.Config.Conditions) > 0 {
+			step.ConfigSnapshot, _ = json.Marshal(node.Config.Conditions)
+		}
 		started := time.Now()
 		current, produced, err := e.evalNode(ctx, p.flow, node, state.msg, seenTargets, snapshot, &step)
 		step.DurationUS = time.Since(started).Microseconds()
@@ -482,15 +523,35 @@ func (e *Engine) evaluatePlan(ctx context.Context, msg *domainmessage.Normalized
 		}
 		next := p.out[node.ID]
 		for _, to := range next {
-			queue = append(queue, evalState{nodeID: to, msg: cloneMessage(current)})
+			queue = append(queue, evalState{nodeID: to, fromID: node.ID, msg: cloneMessage(current)})
 		}
 	}
 	for _, node := range p.flow.Nodes {
 		if !visited[node.ID] {
-			trace.Nodes = append(trace.Nodes, decision.Node{NodeID: node.ID, Type: string(node.Type), Status: "skipped", Reason: "path_not_reached"})
+			trace.Nodes = append(trace.Nodes, skippedNode(node, snapshot, "path_not_reached"))
 		}
 	}
 	return matches, nil
+}
+
+func skippedNode(node domainflow.Node, snapshot filterset.Snapshot, reason string) decision.Node {
+	step := decision.Node{NodeID: node.ID, Type: string(node.Type), Status: "skipped", Reason: reason}
+	if node.Type != domainflow.NodeTypeFilter {
+		return step
+	}
+	for _, id := range node.Config.FilterIDs {
+		entry := snapshot[id]
+		filter := decision.Filter{ID: id, Name: entry.Name, Revision: entry.Revision, Result: decision.Condition{Type: "all", Status: "skipped", Reason: reason}}
+		if entry.Program != nil {
+			filter.Hash = entry.Program.Hash
+		}
+		step.Filters = append(step.Filters, filter)
+	}
+	if len(node.Config.Conditions) > 0 {
+		step.ConfigSnapshot, _ = json.Marshal(node.Config.Conditions)
+		step.Conditions = &decision.Condition{Type: "all", Status: "skipped", Reason: reason}
+	}
+	return step
 }
 
 func (e *Engine) evalNode(ctx context.Context, f *domainflow.Flow, n domainflow.Node, msg *domainmessage.NormalizedMessage, seenTargets map[int64]bool, snapshot filterset.Snapshot, step *decision.Node) (*domainmessage.NormalizedMessage, *domainflow.Match, error) {

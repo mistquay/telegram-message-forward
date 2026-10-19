@@ -29,10 +29,13 @@ func validateFields(name string, fields []formschema.FieldSpec, config map[strin
 	}
 	for _, field := range fields {
 		value, present := config[field.Key]
-		if !present || value == nil {
+		if !present {
 			continue
 		}
 		bad := func(message string) error { return invalid(name, "config."+field.Key, message) }
+		if value == nil {
+			return bad("配置项不能为 null；不设置时请移除该项")
+		}
 		switch field.Type {
 		case formschema.FieldText, formschema.FieldTextarea:
 			text, ok := value.(string)
@@ -55,7 +58,8 @@ func validateFields(name string, fields []formschema.FieldSpec, config map[strin
 				if strings.TrimSpace(item) == "" {
 					return bad("不能包含空项")
 				}
-				if len(field.Options) > 0 {
+				// Source plugins may emit custom message/media/peer types; options are UI suggestions.
+				if len(field.Options) > 0 && field.Key != "types" && field.Key != "peer_types" {
 					valid := false
 					for _, option := range field.Options {
 						valid = valid || item == option.Value

@@ -1,14 +1,17 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"telegram-message-forward/internal/api/dto"
 	appflow "telegram-message-forward/internal/app/flow"
 	domainflow "telegram-message-forward/internal/domain/flow"
+	"telegram-message-forward/internal/ruleengine/condition"
 )
 
 type FlowHandler struct {
@@ -40,11 +43,15 @@ func (h *FlowHandler) Meta(c *gin.Context) {
 }
 
 func (h *FlowHandler) Preview(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2<<20)
 	var req dto.FlowPreviewRequest
 	if !bindJSON(c, &req) {
 		return
 	}
-	result, err := h.svc.Preview(c.Request.Context(), appflow.PreviewInput{
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+	result, err := h.svc.Preview(ctx, appflow.PreviewInput{
+		FlowID: req.FlowID, MessageID: req.MessageID, FullChain: req.FullChain, Edit: req.Edit,
 		Flow: toFlowInput(req.Flow),
 		Message: appflow.PreviewMessage{
 			SourceID:       req.Message.SourceID,
@@ -55,6 +62,7 @@ func (h *FlowHandler) Preview(c *gin.Context) {
 			Text:           req.Message.Text,
 			Media:          req.Message.Media,
 			OriginalURL:    req.Message.OriginalURL,
+			ReceivedAt:     req.Message.ReceivedAt, SentAt: req.Message.SentAt, Links: req.Message.Links,
 		},
 	})
 	if err != nil {
@@ -63,9 +71,10 @@ func (h *FlowHandler) Preview(c *gin.Context) {
 	}
 	targets := make([]dto.RulePreviewTargetDTO, 0, len(result.Targets))
 	for _, target := range result.Targets {
-		targets = append(targets, dto.RulePreviewTargetDTO{SinkID: target.SinkID, TemplateID: target.TemplateID})
+		targets = append(targets, dto.RulePreviewTargetDTO{FlowID: target.FlowID, NodeID: target.NodeID, Text: target.Text, Media: target.Media, Status: target.Status, SinkID: target.SinkID, TemplateID: target.TemplateID})
 	}
 	c.JSON(http.StatusOK, gin.H{"data": dto.RulePreviewDTO{
+		Evaluation:    result.Evaluation,
 		Matched:       result.Matched,
 		ProcessedText: result.ProcessedText,
 		Media:         result.Media,
@@ -140,6 +149,11 @@ func toFlowInput(req dto.FlowRequest) appflow.Input {
 }
 
 func respondFlowError(c *gin.Context, err error) {
+	var validation *condition.ValidationError
+	if errors.As(err, &validation) {
+		respondError(c, err)
+		return
+	}
 	if errors.Is(err, domainflow.ErrNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "资源不存在"})
 		return

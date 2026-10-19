@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	domainfilter "telegram-message-forward/internal/domain/filter"
 	domainsink "telegram-message-forward/internal/domain/sink"
 	"telegram-message-forward/internal/ruleengine/condition"
 )
@@ -23,6 +24,10 @@ func parseID(c *gin.Context) (int64, bool) {
 
 // respondError 按错误类型返回合适的状态码。
 func respondError(c *gin.Context, err error) {
+	if errors.Is(err, domainfilter.ErrConflict) || errors.Is(err, domainfilter.ErrInUse) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
 	var validation *condition.ValidationError
 	if errors.As(err, &validation) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "fields": []condition.ValidationError{*validation}})

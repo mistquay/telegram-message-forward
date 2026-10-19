@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	domainflow "telegram-message-forward/internal/domain/flow"
 	"telegram-message-forward/internal/domain/formschema"
 	domainmessage "telegram-message-forward/internal/domain/message"
 )
@@ -60,11 +61,11 @@ func RegisterWithDescriptor(name string, c Condition, desc Descriptor) {
 
 // Get 返回指定条件实现。
 func Get(name string) (Condition, error) {
-	c, err := getRaw(name)
+	_, err := getRaw(name)
 	if err != nil {
 		return nil, err
 	}
-	return checkedCondition{name: name, impl: c}, nil
+	return checkedCondition{name: name}, nil
 }
 
 func getRaw(name string) (Condition, error) {
@@ -118,7 +119,6 @@ func ValidateConfig(name string, config map[string]any) error {
 
 type checkedCondition struct {
 	name string
-	impl Condition
 }
 
 func (c checkedCondition) Evaluate(ctx context.Context, msg *domainmessage.NormalizedMessage, config map[string]any) (bool, error) {
@@ -128,8 +128,10 @@ func (c checkedCondition) Evaluate(ctx context.Context, msg *domainmessage.Norma
 	if msg == nil {
 		return false, fmt.Errorf("过滤消息不能为空")
 	}
-	if err := ValidateConfig(c.name, config); err != nil {
+	program, err := Compile([]domainflow.ConditionConfig{{Type: c.name, Config: config}})
+	if err != nil {
 		return false, err
 	}
-	return c.impl.Evaluate(ctx, msg, config)
+	result, err := program.Evaluate(ctx, msg)
+	return result.Status == "passed", err
 }

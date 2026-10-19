@@ -19,6 +19,7 @@ type MessageDeliveryCountsDTO struct {
 }
 
 type MessageDTO struct {
+	ContentRevision   int                      `json:"content_revision"`
 	ID                int64                    `json:"id"`
 	SourceID          int64                    `json:"source_id"`
 	SourceName        string                   `json:"source_name"`
@@ -74,7 +75,8 @@ func NewMessageDTO(item *domainmessage.ListItem) MessageDTO {
 		links = []domainmessage.Link{}
 	}
 	return MessageDTO{
-		ID: m.ID, SourceID: m.SourceID, SourceName: item.SourceName, SourceType: item.SourceType,
+		ContentRevision: m.ContentRevision,
+		ID:              m.ID, SourceID: m.SourceID, SourceName: item.SourceName, SourceType: item.SourceType,
 		SourceUsername: item.SourceUsername, ExternalMessageID: m.ExternalMessageID, GroupedID: m.GroupedID,
 		MessageType: m.MessageType, SenderPeerType: m.SenderPeerType, SenderID: m.SenderID,
 		SenderName: m.SenderName, Text: m.Text, Media: media, Links: links, OriginalURL: m.OriginalURL,

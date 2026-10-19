@@ -81,3 +81,8 @@ type Repository interface {
 	Delete(ctx context.Context, id int64) error
 	UpdateTestResult(ctx context.Context, id int64, at time.Time, success bool, errText string) error
 }
+
+// RoutingReader reads only routing metadata, without credentials or lazy migrations.
+type RoutingReader interface {
+	GetRoutingInfo(context.Context, int64) (*Sink, error)
+}

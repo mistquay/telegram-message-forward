@@ -75,7 +75,6 @@ type App struct {
 	mediaStore  *mediastore.Manager
 	settingsSvc *appsettings.Service
 	chatArchive *appchatarchive.Service
-	decisions   *repository.DecisionRepository
 	db          *sql.DB
 	deps        *Deps
 }
@@ -168,6 +167,7 @@ func Build(cfg *config.Config) (*App, error) {
 		Deliveries: deliveries,
 		Messages:   messages,
 	})
+	settingsSvc.SetDecisionsCleaner(decisions.DeleteBefore)
 	mediaStore := mediastore.NewManager()
 	mediaSignKey := []byte(cfg.Security.EncryptionKey)
 	// Telegram 下载策略随媒体设置一起热更新：reloadMedia 时刷新，插件通过闭包读取。
@@ -215,6 +215,7 @@ func Build(cfg *config.Config) (*App, error) {
 	ingestSvc := appingest.NewService(messages, flows, flowEngine, queue, clk, log).
 		UseMediaStore(mediaStore).
 		UseDecisions(decisions).
+		UseProcessingTransaction(repository.NewProcessingTransaction(db)).
 		UseSourceCursor(sources)
 	deliverySvc := appdelivery.NewService(deliveries, appdelivery.DisplayDeps{
 		Messages:  messages,
@@ -320,8 +321,8 @@ func Build(cfg *config.Config) (*App, error) {
 	accountSvc := appaccount.NewService(accounts, telegramApps, proxies)
 	sinkSvc := appsink.NewService(sinks, deliveries)
 	templateSvc := apptemplate.NewService(templates)
-	flowSvc := appflow.NewService(flows, flowEngine, appflow.ValidatorDeps{Sources: sources, Sinks: sinks, Templates: templates, Filters: filters})
-	filterSvc := appfilter.NewService(filters)
+	flowSvc := appflow.NewService(flows, flowEngine, appflow.ValidatorDeps{Sources: sources, Sinks: sinks, Templates: templates, Filters: filters, Messages: messages, Tasks: deliveries})
+	filterSvc := appfilter.NewService(filters).UseDiagnostics(appfilter.DiagnosticsDeps{Messages: messages, Queries: messages, Decisions: decisions})
 	sourceSvc := appsource.NewService(sources, accounts, tgPlugin, srcManager)
 	// 聊天归档是独立旁路：不接 ingest、不进 Flow、不产生投递任务。
 	chatArchiveSvc := appchatarchive.NewService(
@@ -418,8 +419,7 @@ func Build(cfg *config.Config) (*App, error) {
 		cfg: cfg, log: log, server: server, workers: workers,
 		srcManager: srcManager, tgLogin: tgLoginSvc, aiSched: aiScheduler,
 		mediaStore: mediaStore, settingsSvc: settingsSvc, chatArchive: chatArchiveSvc,
-		decisions: decisions,
-		db:        sqlDB, deps: deps,
+		db: sqlDB, deps: deps,
 	}, nil
 }
 
@@ -501,28 +501,16 @@ func (a *App) runDataArchiveCleanup(ctx context.Context) {
 		return
 	}
 	cleanup := func() {
-		// Decision evidence is kept for 30 days independently of message retention.
-		if a.decisions != nil {
-			for i := 0; i < 100; i++ {
-				n, err := a.decisions.DeleteBefore(ctx, time.Now().Add(-30*24*time.Hour), 500)
-				if err != nil {
-					a.log.Warn("决策记录清理失败", "err", err)
-					break
-				}
-				if n < 500 {
-					break
-				}
-			}
-		}
 		res, err := a.settingsSvc.RunArchiveCleanup(ctx)
 		if err != nil {
 			a.log.Warn("归档清理失败", "err", err)
 			return
 		}
-		if res.DeletedMessages > 0 || res.DeletedDeliveryTasks > 0 {
+		if res.DeletedMessages > 0 || res.DeletedDeliveryTasks > 0 || res.DeletedDecisions > 0 {
 			a.log.Info("已清理过期消息与投递记录",
 				"messages", res.DeletedMessages,
 				"delivery_tasks", res.DeletedDeliveryTasks,
+				"decisions", res.DeletedDecisions,
 			)
 		}
 	}

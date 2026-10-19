@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"telegram-message-forward/internal/domain/decision"
+	domaindelivery "telegram-message-forward/internal/domain/delivery"
 	domainfilter "telegram-message-forward/internal/domain/filter"
 	domainflow "telegram-message-forward/internal/domain/flow"
 	domainmessage "telegram-message-forward/internal/domain/message"
@@ -25,9 +28,13 @@ type Service struct {
 	sinks     domainsink.Repository
 	templates domaintemplate.Repository
 	filters   domainfilter.Repository
+	messages  domainmessage.Repository
+	tasks     domaindelivery.Repository
 }
 
 type ValidatorDeps struct {
+	Messages  domainmessage.Repository
+	Tasks     domaindelivery.Repository
 	Sources   domainsource.Repository
 	Sinks     domainsink.Repository
 	Templates domaintemplate.Repository
@@ -41,6 +48,7 @@ func NewService(repo domainflow.Repository, engine *flowengine.Engine, deps ...V
 		s.sinks = deps[0].Sinks
 		s.templates = deps[0].Templates
 		s.filters = deps[0].Filters
+		s.messages, s.tasks = deps[0].Messages, deps[0].Tasks
 	}
 	return s
 }
@@ -55,6 +63,8 @@ type Input struct {
 }
 
 type PreviewMessage struct {
+	Links          []domainmessage.Link
+	SentAt         *time.Time
 	SourceID       int64
 	MessageType    string
 	SenderPeerType string
@@ -67,16 +77,26 @@ type PreviewMessage struct {
 }
 
 type PreviewInput struct {
-	Flow    Input
-	Message PreviewMessage
+	FlowID    int64
+	MessageID int64
+	FullChain bool
+	Edit      bool
+	Flow      Input
+	Message   PreviewMessage
 }
 
 type PreviewTarget struct {
+	FlowID     int64                 `json:"flow_id"`
+	NodeID     int64                 `json:"node_id"`
+	Text       string                `json:"text"`
+	Media      []domainmessage.Media `json:"media"`
+	Status     string                `json:"status"`
 	SinkID     int64
 	TemplateID *int64
 }
 
 type PreviewResult struct {
+	Evaluation    decision.Evaluation
 	Matched       bool
 	ProcessedText string
 	Media         []domainmessage.Media
@@ -130,8 +150,17 @@ func (s *Service) Delete(ctx context.Context, id int64) error {
 
 // Preview 用一条手工样例消息预演当前 Flow 草稿，不要求 Flow 先落库。
 func (s *Service) Preview(ctx context.Context, in PreviewInput) (*PreviewResult, error) {
-	f := toFlow(-1, in.Flow)
-	f.Enabled = true
+	if in.Edit && (in.MessageID <= 0 || s.tasks == nil) {
+		return nil, fmt.Errorf("编辑模拟需要一条已采集的真实消息")
+	}
+	id := in.FlowID
+	if id <= 0 {
+		id = -1
+	}
+	f := toFlow(id, in.Flow)
+	if !in.FullChain {
+		f.Enabled = true
+	}
 	if err := s.validate(ctx, f); err != nil {
 		return nil, err
 	}
@@ -145,6 +174,17 @@ func (s *Service) Preview(ctx context.Context, in PreviewInput) (*PreviewResult,
 		Media:          in.Message.Media,
 		OriginalURL:    in.Message.OriginalURL,
 		ReceivedAt:     in.Message.ReceivedAt,
+		Links:          in.Message.Links, SentAt: in.Message.SentAt,
+	}
+	if in.MessageID > 0 {
+		if s.messages == nil {
+			return nil, fmt.Errorf("真实消息查询不可用")
+		}
+		var err error
+		msg, err = s.messages.GetByID(ctx, in.MessageID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if msg.MessageType == "" {
 		msg.MessageType = "text"
@@ -153,22 +193,68 @@ func (s *Service) Preview(ctx context.Context, in PreviewInput) (*PreviewResult,
 		msg.ReceivedAt = time.Now()
 	}
 	engine := flowengine.NewEngine(flowengine.WithFilterResolver(s.filters))
-	matches, err := engine.Evaluate(ctx, msg, []*domainflow.Flow{f})
+	flows := []*domainflow.Flow{f}
+	if in.FullChain {
+		loaded, err := s.repo.ListEnabledBySource(ctx, msg.SourceID)
+		if err != nil {
+			return nil, err
+		}
+		flows = []*domainflow.Flow{f}
+		for _, other := range loaded {
+			if in.FlowID <= 0 && other.ID >= f.ID {
+				f.ID = other.ID + 1
+			}
+			if other.ID != in.FlowID {
+				flows = append(flows, other)
+			}
+		}
+	}
+	matches, evaluation, err := engine.EvaluateDetailed(ctx, msg, flows)
 	if err != nil {
 		return nil, err
 	}
 	if len(matches) == 0 {
-		return &PreviewResult{Matched: false, ProcessedText: msg.Text, Media: msg.Media}, nil
+		return &PreviewResult{Evaluation: evaluation, Matched: false, ProcessedText: msg.Text, Media: msg.Media, Targets: []PreviewTarget{}}, nil
+	}
+	var routes []domaindelivery.FlowRoute
+	if in.Edit {
+		if in.MessageID <= 0 || s.tasks == nil {
+			return nil, fmt.Errorf("编辑模拟需要一条已采集的真实消息")
+		}
+		routes, err = s.tasks.ListFlowRoutesByMessage(ctx, in.MessageID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	targets := make([]PreviewTarget, 0, len(matches))
 	processedText := matches[0].Message.Text
 	media := matches[0].Message.Media
 	for _, match := range matches {
 		for _, target := range match.Targets {
-			targets = append(targets, PreviewTarget{SinkID: target.SinkID, TemplateID: target.TemplateID})
+			status := "would_enqueue"
+			if in.Edit {
+				status = "skipped_no_historical_route"
+				for _, route := range routes {
+					if route.OriginID == match.OriginID && route.OriginNodeID == match.OriginNodeID && route.SinkID == target.SinkID {
+						status = "would_enqueue"
+						break
+					}
+				}
+			}
+			if s.sinks != nil {
+				sink, err := s.routingSink(ctx, target.SinkID)
+				if err != nil {
+					return nil, err
+				}
+				if !sink.Enabled {
+					status = "skipped_sink_disabled"
+				}
+			}
+			targets = append(targets, PreviewTarget{FlowID: match.OriginID, NodeID: match.OriginNodeID, Text: match.Message.Text, Media: match.Message.Media, Status: status, SinkID: target.SinkID, TemplateID: target.TemplateID})
 		}
 	}
 	return &PreviewResult{
+		Evaluation:    evaluation,
 		Matched:       true,
 		ProcessedText: processedText,
 		Media:         media,
@@ -199,6 +285,9 @@ func toFlow(id int64, in Input) *domainflow.Flow {
 func (s *Service) validate(ctx context.Context, f *domainflow.Flow) error {
 	if f.Name == "" {
 		return fmt.Errorf("flow 名称不能为空")
+	}
+	if utf8.RuneCountInString(f.Name) > 100 {
+		return fmt.Errorf("flow 名称不能超过 100 个字符")
 	}
 	if s.engine == nil {
 		s.engine = flowengine.NewEngine(flowengine.WithFilterResolver(s.filters))
@@ -251,7 +340,7 @@ func (s *Service) validateTarget(ctx context.Context, n domainflow.Node) error {
 	if s.sinks == nil || n.RefID == nil {
 		return nil
 	}
-	sk, err := s.sinks.GetByID(ctx, *n.RefID)
+	sk, err := s.routingSink(ctx, *n.RefID)
 	if err != nil {
 		return fmt.Errorf("目标节点(node=%d)引用的渠道不存在 id=%d: %w", n.ID, *n.RefID, err)
 	}
@@ -270,6 +359,13 @@ func (s *Service) validateTarget(ctx context.Context, n domainflow.Node) error {
 		return fmt.Errorf("目标节点(node=%d)渠道 %s 不支持模板格式 %s", n.ID, sk.Type, format)
 	}
 	return nil
+}
+
+func (s *Service) routingSink(ctx context.Context, id int64) (*domainsink.Sink, error) {
+	if reader, ok := s.sinks.(domainsink.RoutingReader); ok {
+		return reader.GetRoutingInfo(ctx, id)
+	}
+	return s.sinks.GetByID(ctx, id)
 }
 
 func sinkSupportsFormat(c domainsink.Capabilities, f domaintemplate.Format) bool {

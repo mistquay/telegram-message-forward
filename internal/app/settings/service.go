@@ -114,6 +114,7 @@ const DefaultDeliveryTasksRetentionDays = 90
 
 // DefaultAIRunsRetentionDays 是 AI 运行记录保留天数默认值。
 const DefaultAIRunsRetentionDays = 30
+const DefaultDecisionsRetentionDays = 30
 
 // archiveBatchSize 是单次分批删除上限，避免长锁。
 const archiveBatchSize = 500
@@ -124,6 +125,7 @@ const maxArchiveRounds = 100
 // DataRetentionSettings 是消息与投递记录保留策略。
 // 0 表示不清理；单位为天，保存后热生效。
 type DataRetentionSettings struct {
+	DecisionsRetentionDays     int `json:"decisions_retention_days"`
 	MessagesRetentionDays      int `json:"messages_retention_days"`
 	DeliveryTasksRetentionDays int `json:"delivery_tasks_retention_days"`
 	// AIRunsRetentionDays 是 AI 整理 run 保留天数；0=不清理。
@@ -132,12 +134,14 @@ type DataRetentionSettings struct {
 
 // ArchiveResult 汇总一次归档清理的删除计数。
 type ArchiveResult struct {
+	DeletedDecisions     int64 `json:"deleted_decisions"`
 	DeletedMessages      int64 `json:"deleted_messages"`
 	DeletedDeliveryTasks int64 `json:"deleted_delivery_tasks"`
 }
 
 // DataCleanupTargets 指定一次手动数据清理的目标。
 type DataCleanupTargets struct {
+	Decisions     bool
 	Messages      bool
 	DeliveryTasks bool
 	AIRuns        bool
@@ -145,11 +149,12 @@ type DataCleanupTargets struct {
 
 // Empty 返回是否未选择任何目标。
 func (t DataCleanupTargets) Empty() bool {
-	return !t.Messages && !t.DeliveryTasks && !t.AIRuns
+	return !t.Messages && !t.DeliveryTasks && !t.AIRuns && !t.Decisions
 }
 
 // DataCleanupResult 汇总手动数据清理结果和实际使用的保留策略。
 type DataCleanupResult struct {
+	DeletedDecisions     int64                 `json:"deleted_decisions"`
 	DeletedMessages      int64                 `json:"deleted_messages"`
 	DeletedDeliveryTasks int64                 `json:"deleted_delivery_tasks"`
 	DeletedAIRuns        int64                 `json:"deleted_ai_runs"`
@@ -168,16 +173,17 @@ type ArchiveStore interface {
 
 // Service 是系统设置应用服务。
 type Service struct {
-	repo         domainsettings.Repository
-	fileDefaults MediaSettings
-	fileSecret   string
-	reload       MediaReloader
-	testS3       MediaTester
-	cleanMedia   MediaCleaner
-	archive      ArchiveStore
-	cleanAIRuns  AIRunsCleaner
-	archiveMu    sync.Mutex
-	now          func() time.Time
+	repo           domainsettings.Repository
+	fileDefaults   MediaSettings
+	fileSecret     string
+	reload         MediaReloader
+	testS3         MediaTester
+	cleanMedia     MediaCleaner
+	archive        ArchiveStore
+	cleanAIRuns    AIRunsCleaner
+	cleanDecisions func(context.Context, time.Time, int) (int64, error)
+	archiveMu      sync.Mutex
+	now            func() time.Time
 }
 
 // NewService 创建设置服务，配置文件的 media 段作为默认值。
@@ -201,6 +207,10 @@ func (s *Service) SetMediaCleaner(fn MediaCleaner) { s.cleanMedia = fn }
 
 // SetArchiveStore 注入消息/投递归档存储。
 func (s *Service) SetArchiveStore(store ArchiveStore) { s.archive = store }
+
+func (s *Service) SetDecisionsCleaner(fn func(context.Context, time.Time, int) (int64, error)) {
+	s.cleanDecisions = fn
+}
 
 // SetAIRunsCleaner 注入 AI run 清理实现。
 func (s *Service) SetAIRunsCleaner(fn AIRunsCleaner) { s.cleanAIRuns = fn }
@@ -361,8 +371,9 @@ func (s *Service) UpdateDataRetention(ctx context.Context, in DataRetentionSetti
 // RunArchiveCleanup 按当前保留策略分批清理过期消息与终态投递任务。
 // 保留天数为 0 时对应类型不清理。先清投递再清消息，避免无用的长事务。
 func (s *Service) RunArchiveCleanup(ctx context.Context) (ArchiveResult, error) {
-	result, err := s.runDataCleanup(ctx, DataCleanupTargets{Messages: true, DeliveryTasks: true})
+	result, err := s.runDataCleanup(ctx, DataCleanupTargets{Messages: true, DeliveryTasks: true, Decisions: s.cleanDecisions != nil})
 	return ArchiveResult{
+		DeletedDecisions:     result.DeletedDecisions,
 		DeletedMessages:      result.DeletedMessages,
 		DeletedDeliveryTasks: result.DeletedDeliveryTasks,
 	}, err
@@ -390,6 +401,20 @@ func (s *Service) runDataCleanup(ctx context.Context, targets DataCleanupTargets
 	out.Retention = dr
 	out.Source = source
 	now := s.now()
+	if targets.Decisions && dr.DecisionsRetentionDays > 0 {
+		if s.cleanDecisions == nil {
+			return out, fmt.Errorf("决策清理能力未装配")
+		}
+		before := now.Add(-time.Duration(dr.DecisionsRetentionDays) * 24 * time.Hour)
+		n, limited, err := deleteInBatches(ctx, archiveBatchSize, maxArchiveRounds, func(limit int) (int64, error) { return s.cleanDecisions(ctx, before, limit) })
+		if err != nil {
+			return out, fmt.Errorf("清理决策记录失败: %w", err)
+		}
+		out.DeletedDecisions = n
+		if limited {
+			out.LimitReached = append(out.LimitReached, "decisions")
+		}
+	}
 	if targets.DeliveryTasks && dr.DeliveryTasksRetentionDays > 0 && s.archive != nil {
 		before := now.Add(-time.Duration(dr.DeliveryTasksRetentionDays) * 24 * time.Hour)
 		n, limited, err := deleteInBatches(ctx, archiveBatchSize, maxArchiveRounds, func(limit int) (int64, error) {
@@ -451,6 +476,7 @@ func deleteInBatches(ctx context.Context, batch, maxRounds int, fn func(limit in
 
 func defaultDataRetention() DataRetentionSettings {
 	return DataRetentionSettings{
+		DecisionsRetentionDays:     DefaultDecisionsRetentionDays,
 		MessagesRetentionDays:      DefaultMessagesRetentionDays,
 		DeliveryTasksRetentionDays: DefaultDeliveryTasksRetentionDays,
 		AIRunsRetentionDays:        DefaultAIRunsRetentionDays,
@@ -458,7 +484,7 @@ func defaultDataRetention() DataRetentionSettings {
 }
 
 func validateDataRetention(in DataRetentionSettings) error {
-	if in.MessagesRetentionDays < 0 || in.DeliveryTasksRetentionDays < 0 || in.AIRunsRetentionDays < 0 {
+	if in.MessagesRetentionDays < 0 || in.DeliveryTasksRetentionDays < 0 || in.AIRunsRetentionDays < 0 || in.DecisionsRetentionDays < 0 {
 		return fmt.Errorf("保留天数不能为负数（0 表示不清理）")
 	}
 	return nil
@@ -476,6 +502,9 @@ func decodeDataRetention(value map[string]any) (DataRetentionSettings, error) {
 	// 历史记录无 ai 字段时回落默认 30 天，避免「字段缺失=0 永不清理」的意外。
 	if _, ok := value["ai_runs_retention_days"]; !ok && dr.AIRunsRetentionDays == 0 {
 		dr.AIRunsRetentionDays = DefaultAIRunsRetentionDays
+	}
+	if _, ok := value["decisions_retention_days"]; !ok {
+		dr.DecisionsRetentionDays = DefaultDecisionsRetentionDays
 	}
 	return dr, nil
 }

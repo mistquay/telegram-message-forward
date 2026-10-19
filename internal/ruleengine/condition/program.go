@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
@@ -74,7 +76,7 @@ func Compile(configs []domainflow.ConditionConfig) (*Program, error) {
 }
 
 func compileNode(cfg domainflow.ConditionConfig, depth int, count *int, path string) (*compiledCondition, error) {
-	*count++
+	*count = *count + 1
 	if *count > MaxConditions+1 || depth > MaxGroupDepth+1 {
 		return nil, invalid(path, "children", "条件不能超过 100 个，分组不能超过 3 层")
 	}
@@ -96,10 +98,10 @@ func compileNode(cfg domainflow.ConditionConfig, depth int, count *int, path str
 		return nil, invalid(path, "children", "只有 all/any 分组允许子条件")
 	}
 	if err := ValidateConfig(cfg.Type, cfg.Config); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+		return nil, configErrorAt(path, cfg.Type, err)
 	}
 	if err := validateTextScope(cfg); err != nil {
-		return nil, err
+		return nil, configErrorAt(path, cfg.Type, err)
 	}
 	node.impl, _ = getRaw(cfg.Type)
 	if cfg.Type == "regex" {
@@ -108,8 +110,20 @@ func compileNode(cfg domainflow.ConditionConfig, depth int, count *int, path str
 	return node, nil
 }
 
+func configErrorAt(path, typ string, err error) error {
+	var validation *ValidationError
+	if errors.As(err, &validation) {
+		return &ValidationError{Path: path + "." + strings.TrimPrefix(validation.Path, typ+"."), Message: validation.Message}
+	}
+	return &ValidationError{Path: path + ".type", Message: err.Error()}
+}
+
 func validateTextScope(cfg domainflow.ConditionConfig) error {
+	textCondition := cfg.Type == "keyword_contains" || cfg.Type == "keyword_excludes" || cfg.Type == "regex"
 	if fields, ok := cfg.Config["fields"]; ok {
+		if !textCondition {
+			return invalid(cfg.Type, "config.fields", "该条件不支持文本检查范围")
+		}
 		items, err := strictStrings(fields)
 		if err != nil || len(items) == 0 {
 			return invalid(cfg.Type, "config.fields", "匹配字段必须为非空字符串列表")
@@ -120,11 +134,14 @@ func validateTextScope(cfg domainflow.ConditionConfig) error {
 			}
 		}
 	}
-	if mode := configString(cfg.Config, "normalize"); mode != "" && !stringIn(mode, []string{"none", "nfkc", "strip_invisible"}) {
-		return invalid(cfg.Type, "config.normalize", "不支持的文本规范化方式")
+	if value, present := cfg.Config["normalize"]; present {
+		mode, ok := value.(string)
+		if !textCondition || !ok || !stringIn(mode, []string{"none", "nfkc", "strip_invisible"}) {
+			return invalid(cfg.Type, "config.normalize", "不支持的文本规范化方式")
+		}
 	}
-	if value, exists := cfg.Config["time_basis"]; exists && value != "sent" && value != "received" {
-		return invalid(cfg.Type, "config.time_basis", "必须选择 sent 或 received")
+	if value, exists := cfg.Config["time_basis"]; exists && (cfg.Type != "time_window" || (value != "sent" && value != "received")) {
+		return invalid(cfg.Type, "config.time_basis", "时间窗口必须选择 sent 或 received")
 	}
 	return nil
 }
@@ -137,6 +154,7 @@ func (p *Program) Evaluate(ctx context.Context, msg *domainmessage.NormalizedMes
 }
 
 func (n *compiledCondition) evaluate(ctx context.Context, msg *domainmessage.NormalizedMessage, path string, skipped bool) (decision.Condition, error) {
+	start := time.Now()
 	r := decision.Condition{Path: path, Type: n.cfg.Type, Negate: n.cfg.Negate, Status: "skipped"}
 	var err error
 	passed := n.cfg.Type != "any"
@@ -169,6 +187,7 @@ func (n *compiledCondition) evaluate(ctx context.Context, msg *domainmessage.Nor
 	}
 	if err != nil {
 		r.Status, r.Reason = "error", "condition_execution_failed"
+		r.DurationUS = time.Since(start).Microseconds()
 		return r, err
 	}
 	if n.cfg.Negate {
@@ -178,6 +197,7 @@ func (n *compiledCondition) evaluate(ctx context.Context, msg *domainmessage.Nor
 	if passed {
 		r.Status = "passed"
 	}
+	r.DurationUS = time.Since(start).Microseconds()
 	return r, nil
 }
 

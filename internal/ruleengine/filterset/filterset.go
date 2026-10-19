@@ -16,6 +16,8 @@ type Resolver interface {
 	GetByID(context.Context, int64) (*domainfilter.Filter, error)
 }
 
+const MaxReferences = 32
+
 type batchResolver interface {
 	GetByIDs(context.Context, []int64) ([]*domainfilter.Filter, error)
 }
@@ -28,6 +30,16 @@ type Entry struct {
 }
 
 type Snapshot map[int64]Entry
+
+type ResolutionError struct {
+	ID  int64
+	Err error
+}
+
+func (e *ResolutionError) Error() string {
+	return fmt.Sprintf("共享过滤器 id=%d 解析失败: %v", e.ID, e.Err)
+}
+func (e *ResolutionError) Unwrap() error { return e.Err }
 
 func Resolve(ctx context.Context, resolver Resolver, ids []int64) (Snapshot, error) {
 	out := Snapshot{}
@@ -59,7 +71,7 @@ func Resolve(ctx context.Context, resolver Resolver, ids []int64) (Snapshot, err
 		for _, id := range unique {
 			f, err := resolver.GetByID(ctx, id)
 			if err != nil {
-				return nil, fmt.Errorf("加载共享过滤器失败 id=%d: %w", id, err)
+				return nil, &ResolutionError{ID: id, Err: err}
 			}
 			filters = append(filters, f)
 		}
@@ -70,19 +82,22 @@ func Resolve(ctx context.Context, resolver Resolver, ids []int64) (Snapshot, err
 		}
 		program, err := condition.Compile(f.Conditions)
 		if err != nil {
-			return nil, fmt.Errorf("共享过滤器 id=%d 配置无效: %w", f.ID, err)
+			return nil, &ResolutionError{ID: f.ID, Err: err}
 		}
 		out[f.ID] = Entry{ID: f.ID, Name: f.Name, Revision: f.Revision, Program: program}
 	}
 	for _, id := range unique {
 		if _, ok := out[id]; !ok {
-			return nil, fmt.Errorf("共享过滤器不存在 id=%d", id)
+			return nil, &ResolutionError{ID: id, Err: fmt.Errorf("过滤器不存在")}
 		}
 	}
 	return out, nil
 }
 
 func (s Snapshot) Evaluate(ctx context.Context, msg *domainmessage.NormalizedMessage, ids []int64, inline []domainflow.ConditionConfig) (bool, []decision.Filter, *decision.Condition, error) {
+	if len(ids) > MaxReferences {
+		return false, nil, nil, fmt.Errorf("单个节点或 AI Profile 不能引用超过 %d 个共享过滤器", MaxReferences)
+	}
 	if len(ids) == 0 {
 		p, err := condition.Compile(inline)
 		if err != nil {

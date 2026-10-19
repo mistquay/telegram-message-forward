@@ -3,18 +3,20 @@ package decision
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
 type Condition struct {
-	Path     string      `json:"path"`
-	Type     string      `json:"type"`
-	Status   string      `json:"status"` // passed | blocked | error | skipped
-	Negate   bool        `json:"negate,omitempty"`
-	Field    string      `json:"field,omitempty"`
-	Evidence string      `json:"evidence,omitempty"`
-	Reason   string      `json:"reason,omitempty"`
-	Children []Condition `json:"children,omitempty"`
+	DurationUS int64       `json:"duration_us"`
+	Path       string      `json:"path"`
+	Type       string      `json:"type"`
+	Status     string      `json:"status"` // passed | blocked | error | skipped
+	Negate     bool        `json:"negate,omitempty"`
+	Field      string      `json:"field,omitempty"`
+	Evidence   string      `json:"evidence,omitempty"`
+	Reason     string      `json:"reason,omitempty"`
+	Children   []Condition `json:"children,omitempty"`
 }
 
 type Filter struct {
@@ -26,13 +28,15 @@ type Filter struct {
 }
 
 type Node struct {
-	NodeID     int64      `json:"node_id"`
-	Type       string     `json:"type"`
-	Status     string     `json:"status"`
-	Filters    []Filter   `json:"filters,omitempty"`
-	Conditions *Condition `json:"conditions,omitempty"`
-	Reason     string     `json:"reason,omitempty"`
-	DurationUS int64      `json:"duration_us"`
+	FromNodeID     int64           `json:"from_node_id,omitempty"`
+	ConfigSnapshot json.RawMessage `json:"config_snapshot,omitempty"`
+	NodeID         int64           `json:"node_id"`
+	Type           string          `json:"type"`
+	Status         string          `json:"status"`
+	Filters        []Filter        `json:"filters,omitempty"`
+	Conditions     *Condition      `json:"conditions,omitempty"`
+	Reason         string          `json:"reason,omitempty"`
+	DurationUS     int64           `json:"duration_us"`
 }
 
 type Flow struct {
@@ -54,12 +58,21 @@ type Target struct {
 }
 
 type Evaluation struct {
-	Version    int      `json:"version"`
-	Status     string   `json:"status"`
-	Reason     string   `json:"reason,omitempty"`
-	Flows      []Flow   `json:"flows"`
-	Targets    []Target `json:"targets"`
-	DurationUS int64    `json:"duration_us"`
+	Truncated    bool          `json:"truncated,omitempty"`
+	FilterTotals []FilterCount `json:"filter_totals,omitempty"`
+	Version      int           `json:"version"`
+	Status       string        `json:"status"`
+	Reason       string        `json:"reason,omitempty"`
+	Flows        []Flow        `json:"flows"`
+	Targets      []Target      `json:"targets"`
+	DurationUS   int64         `json:"duration_us"`
+}
+
+type FilterCount struct {
+	ID      int64 `json:"id"`
+	Passed  int64 `json:"passed"`
+	Blocked int64 `json:"blocked"`
+	Errors  int64 `json:"errors"`
 }
 
 type Record struct {

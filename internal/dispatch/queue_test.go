@@ -165,12 +165,13 @@ func TestQueueEditDoesNotBypassRejectedFilter(t *testing.T) {
 }
 
 func TestQueueEditNeverAddsNewRoutesAndUsesProcessedSnapshot(t *testing.T) {
+	newTemplate := int64(99)
 	repo := &notifyTaskRepo{routes: []domaindelivery.FlowRoute{{SinkID: 30, OriginID: 7, OriginNodeID: 42}}}
 	msg := &domainmessage.NormalizedMessage{ID: 10, Text: "raw", ContentRevision: 2}
 	processed := *msg
 	processed.Text = "processed"
 	matches := []domainflow.Match{
-		{OriginID: 7, OriginNodeID: 42, Message: &processed, Targets: []domainflow.Target{{SinkID: 30}}},
+		{OriginID: 7, OriginNodeID: 42, Message: &processed, Targets: []domainflow.Target{{SinkID: 30, TemplateID: &newTemplate}}},
 		{OriginID: 8, OriginNodeID: 43, Message: msg, Targets: []domainflow.Target{{SinkID: 31}}},
 	}
 	if err := NewQueue(repo, 3).EnqueueEdit(context.Background(), msg, matches, ""); err != nil {
@@ -178,5 +179,44 @@ func TestQueueEditNeverAddsNewRoutesAndUsesProcessedSnapshot(t *testing.T) {
 	}
 	if len(repo.tasks) != 1 || repo.tasks[0].MessageSnapshot.Text != "processed" {
 		t.Fatalf("应仅向原路由投递当前处理快照: %+v", repo.tasks)
+	}
+	if repo.tasks[0].TemplateID == nil || *repo.tasks[0].TemplateID != newTemplate {
+		t.Fatal("编辑补发应使用当前目标模板，而非旧任务模板")
+	}
+}
+
+func TestQueueEditDeduplicatesHistoricalTemplatesForSameRoute(t *testing.T) {
+	one, two := int64(1), int64(2)
+	repo := &notifyTaskRepo{routes: []domaindelivery.FlowRoute{{SinkID: 30, OriginID: 7, OriginNodeID: 42, TemplateID: &one}, {SinkID: 30, OriginID: 7, OriginNodeID: 42, TemplateID: &two}}}
+	msg := &domainmessage.NormalizedMessage{ID: 10, ContentRevision: 3}
+	matches := []domainflow.Match{{OriginID: 7, OriginNodeID: 42, Targets: []domainflow.Target{{SinkID: 30}}, Message: msg}}
+	if err := NewQueue(repo, 3).EnqueueEdit(context.Background(), msg, matches, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.tasks) != 1 {
+		t.Fatal("同一路由历史模板变化不能重复补发")
+	}
+}
+
+type duplicateTaskRepo struct{ notifyTaskRepo }
+
+func (r *duplicateTaskRepo) Create(_ context.Context, task *domaindelivery.Task) error {
+	task.ID = 9
+	task.CreationDisposition = "duplicate"
+	return nil
+}
+
+func TestQueueReportsDuplicateWithoutClaimingNewEnqueue(t *testing.T) {
+	notifier := NewNotifier()
+	repo := &duplicateTaskRepo{}
+	msg := &domainmessage.NormalizedMessage{ID: 1}
+	results, err := NewQueue(repo, 3, notifier).EnqueueDetailed(context.Background(), msg, []domainflow.Match{{OriginID: 2, OriginNodeID: 3, Message: msg, Targets: []domainflow.Target{{SinkID: 4}}}})
+	if err != nil || len(results) != 1 || results[0].Status != "deduplicated" {
+		t.Fatalf("%+v %v", results, err)
+	}
+	select {
+	case <-notifier.C():
+		t.Fatal("未产生新任务时不应声称入队并唤醒")
+	default:
 	}
 }

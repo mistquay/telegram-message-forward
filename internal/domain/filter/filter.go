@@ -4,10 +4,14 @@ package filter
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	domainflow "telegram-message-forward/internal/domain/flow"
 )
+
+var ErrConflict = errors.New("过滤器版本冲突")
+var ErrInUse = errors.New("过滤器仍被引用")
 
 // Filter 是一组可复用的匹配条件。
 type Filter struct {
@@ -18,6 +22,37 @@ type Filter struct {
 	Revision    int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+}
+
+type Reference struct {
+	Kind    string `json:"kind"`
+	ID      int64  `json:"id"`
+	NodeID  int64  `json:"node_id,omitempty"`
+	Name    string `json:"name"`
+	Enabled bool   `json:"enabled"`
+}
+
+type Version struct {
+	Revision    int                          `json:"revision"`
+	Name        string                       `json:"name"`
+	Description string                       `json:"description"`
+	Conditions  []domainflow.ConditionConfig `json:"conditions"`
+	CreatedAt   time.Time                    `json:"created_at"`
+}
+
+type Stats struct {
+	Passed     int64     `json:"passed"`
+	Blocked    int64     `json:"blocked"`
+	Errors     int64     `json:"errors"`
+	References int64     `json:"references"`
+	Since      time.Time `json:"since"`
+}
+
+type DiagnosticsRepository interface {
+	Version(context.Context, int64, int) (*Version, error)
+	References(context.Context, int64) ([]Reference, error)
+	Versions(context.Context, int64, int, int) ([]Version, int64, error)
+	Stats(context.Context, time.Time) (map[int64]Stats, error)
 }
 
 // Repository 是过滤器仓储接口。

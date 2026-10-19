@@ -116,6 +116,7 @@ func (r MediaSettingsRequest) ToSettings() appsettings.MediaSettings {
 
 // DataRetentionDTO 是消息/投递记录保留策略响应。
 type DataRetentionDTO struct {
+	DecisionsRetentionDays     int    `json:"decisions_retention_days"`
 	MessagesRetentionDays      int    `json:"messages_retention_days"`
 	DeliveryTasksRetentionDays int    `json:"delivery_tasks_retention_days"`
 	AIRunsRetentionDays        int    `json:"ai_runs_retention_days"`
@@ -125,6 +126,7 @@ type DataRetentionDTO struct {
 // NewDataRetentionDTO 构造归档设置响应。
 func NewDataRetentionDTO(dr appsettings.DataRetentionSettings, source string) DataRetentionDTO {
 	return DataRetentionDTO{
+		DecisionsRetentionDays:     dr.DecisionsRetentionDays,
 		MessagesRetentionDays:      dr.MessagesRetentionDays,
 		DeliveryTasksRetentionDays: dr.DeliveryTasksRetentionDays,
 		AIRunsRetentionDays:        dr.AIRunsRetentionDays,
@@ -134,14 +136,20 @@ func NewDataRetentionDTO(dr appsettings.DataRetentionSettings, source string) Da
 
 // DataRetentionRequest 是保存归档保留策略的请求体。
 type DataRetentionRequest struct {
-	MessagesRetentionDays      int `json:"messages_retention_days"`
-	DeliveryTasksRetentionDays int `json:"delivery_tasks_retention_days"`
-	AIRunsRetentionDays        int `json:"ai_runs_retention_days"`
+	DecisionsRetentionDays     *int `json:"decisions_retention_days"`
+	MessagesRetentionDays      int  `json:"messages_retention_days"`
+	DeliveryTasksRetentionDays int  `json:"delivery_tasks_retention_days"`
+	AIRunsRetentionDays        int  `json:"ai_runs_retention_days"`
 }
 
 // ToSettings 转换为应用层结构。
 func (r DataRetentionRequest) ToSettings() appsettings.DataRetentionSettings {
+	days := appsettings.DefaultDecisionsRetentionDays
+	if r.DecisionsRetentionDays != nil {
+		days = *r.DecisionsRetentionDays
+	}
 	return appsettings.DataRetentionSettings{
+		DecisionsRetentionDays:     days,
 		MessagesRetentionDays:      r.MessagesRetentionDays,
 		DeliveryTasksRetentionDays: r.DeliveryTasksRetentionDays,
 		AIRunsRetentionDays:        r.AIRunsRetentionDays,
@@ -164,6 +172,8 @@ func (r DataCleanupRequest) ToTargets() (appsettings.DataCleanupTargets, error) 
 			out.DeliveryTasks = true
 		case "ai_runs":
 			out.AIRuns = true
+		case "decisions":
+			out.Decisions = true
 		default:
 			return out, fmt.Errorf("未知的数据清理目标: %s", target)
 		}
@@ -176,6 +186,7 @@ func (r DataCleanupRequest) ToTargets() (appsettings.DataCleanupTargets, error) 
 
 // DataCleanupDTO 是手动数据清理响应。
 type DataCleanupDTO struct {
+	DeletedDecisions     int64            `json:"deleted_decisions"`
 	DeletedMessages      int64            `json:"deleted_messages"`
 	DeletedDeliveryTasks int64            `json:"deleted_delivery_tasks"`
 	DeletedAIRuns        int64            `json:"deleted_ai_runs"`
@@ -190,6 +201,7 @@ func NewDataCleanupDTO(result appsettings.DataCleanupResult) DataCleanupDTO {
 		limited = []string{}
 	}
 	return DataCleanupDTO{
+		DeletedDecisions:     result.DeletedDecisions,
 		DeletedMessages:      result.DeletedMessages,
 		DeletedDeliveryTasks: result.DeletedDeliveryTasks,
 		DeletedAIRuns:        result.DeletedAIRuns,

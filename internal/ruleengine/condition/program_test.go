@@ -2,6 +2,7 @@ package condition
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -91,5 +92,45 @@ func BenchmarkCompiledKeywordEvaluation(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		_, _ = p.Evaluate(ctx, m)
+	}
+}
+
+func TestMediaSelectorsKeepLegacyDocumentAndDistinguishFiles(t *testing.T) {
+	m := &domainmessage.NormalizedMessage{MessageType: "document", Media: []domainmessage.Media{{Type: "document", MimeType: "video/mp4"}}}
+	for _, kind := range []string{"message_type", "media_type"} {
+		c, _ := Get(kind)
+		for value, want := range map[string]bool{"document": true, "video": true, "file": false} {
+			passed, err := c.Evaluate(context.Background(), m, map[string]any{"types": []string{value}})
+			if err != nil || passed != want {
+				t.Fatalf("%s %s passed=%v err=%v", kind, value, passed, err)
+			}
+		}
+	}
+}
+
+func TestCustomSourceTypesRemainCompatible(t *testing.T) {
+	m := &domainmessage.NormalizedMessage{MessageType: "custom_notice", SenderPeerType: "custom_sender", Media: []domainmessage.Media{{Type: "custom_attachment"}}}
+	for typ, cfg := range map[string]map[string]any{"message_type": {"types": []string{"custom_notice"}}, "media_type": {"types": []string{"custom_attachment"}}, "sender": {"peer_types": []string{"custom_sender"}}} {
+		c, _ := Get(typ)
+		passed, err := c.Evaluate(context.Background(), m, cfg)
+		if err != nil || !passed {
+			t.Fatalf("旧 Source 自定义类型不应失效 %s %v %v", typ, passed, err)
+		}
+	}
+}
+
+func TestValidationErrorIncludesNestedFieldPath(t *testing.T) {
+	_, err := Compile([]domainflow.ConditionConfig{{Type: "any", Children: []domainflow.ConditionConfig{{Type: "sender", Config: map[string]any{"sender_ids": []string{"invalid"}}}}}})
+	var validation *ValidationError
+	if !errors.As(err, &validation) || validation.Path != "conditions.0.0.config.sender_ids" {
+		t.Fatalf("无法定位配置字段: %v", err)
+	}
+}
+
+func TestGetAndProgramHaveIdenticalScopeSemantics(t *testing.T) {
+	c, _ := Get("keyword_excludes")
+	passed, err := c.Evaluate(context.Background(), &domainmessage.NormalizedMessage{Text: "safe", Links: []domainmessage.Link{{URL: "https://spam.example"}}}, map[string]any{"keywords": []string{"spam"}, "fields": []string{"links"}})
+	if err != nil || passed {
+		t.Fatalf("公开条件接口必须与编译求值一致 passed=%v err=%v", passed, err)
 	}
 }

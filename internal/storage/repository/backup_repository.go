@@ -410,14 +410,32 @@ func (r *BackupRepository) restore(tx *gorm.DB, p *backupPayload, same bool) err
 	}
 	for _, item := range p.Filters {
 		row := item
-		id, err := saveConfigRow(tx, &row, item.ID, same)
+		var err error
+		row.Conditions, err = remapFilterConditions(row.Conditions, sourceMap)
+		if err != nil {
+			return fmt.Errorf("恢复过滤器 %d: %w", item.ID, err)
+		}
+		id, err := restoreFilterRow(tx, &row, same)
 		if err != nil {
 			return err
 		}
 		filterMap[item.ID] = id
 	}
+	ownedNodes := map[int64]int64{}
+	backedUpNodeFlows := map[int64]int64{}
+	for _, node := range p.FlowNodes {
+		backedUpNodeFlows[node.ID] = node.FlowID
+	}
 	for _, item := range p.Flows {
 		row := item
+		row.UpdatedAt = time.Now()
+		if same {
+			var current model.Flow
+			err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&current, item.ID).Error
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+		}
 		id, err := saveConfigRow(tx, &row, item.ID, same)
 		if err != nil {
 			return err
@@ -427,7 +445,22 @@ func (r *BackupRepository) restore(tx *gorm.DB, p *backupPayload, same bool) err
 			if err := tx.Where("flow_id = ?", id).Delete(&model.FlowEdge{}).Error; err != nil {
 				return err
 			}
-			if err := tx.Where("flow_id = ?", id).Delete(&model.FlowNode{}).Error; err != nil {
+			var existing []model.FlowNode
+			if err := tx.Where("flow_id = ?", id).Find(&existing).Error; err != nil {
+				return err
+			}
+			retained := []int64{}
+			for _, node := range existing {
+				if backedUpNodeFlows[node.ID] == item.ID {
+					ownedNodes[node.ID] = id
+					retained = append(retained, node.ID)
+				}
+			}
+			obsolete := tx.Where("flow_id = ?", id)
+			if len(retained) > 0 {
+				obsolete = obsolete.Where("id NOT IN ?", retained)
+			}
+			if err := obsolete.Delete(&model.FlowNode{}).Error; err != nil {
 				return err
 			}
 		}
@@ -437,18 +470,33 @@ func (r *BackupRepository) restore(tx *gorm.DB, p *backupPayload, same bool) err
 		row.ID = 0
 		row.FlowID = flowMap[item.FlowID]
 		row.TemplateID = mappedPtr(row.TemplateID, templateMap)
+		var err error
+		row.Config, err = remapFilterNodeConfig(row.Config, sourceMap, filterMap)
+		if err != nil {
+			return fmt.Errorf("恢复 Flow 节点 %d: %w", item.ID, err)
+		}
 		if row.RefID != nil {
 			switch row.Type {
 			case "source":
 				row.RefID = mappedPtr(row.RefID, sourceMap)
 			case "filter":
 				row.RefID = mappedPtr(row.RefID, filterMap)
+				if row.RefID == nil {
+					return fmt.Errorf("恢复 Flow 节点 %d: 过滤器引用不存在", item.ID)
+				}
 			case "target":
 				row.RefID = mappedPtr(row.RefID, sinkMap)
 			}
 		}
-		if err := tx.Create(&row).Error; err != nil {
-			return err
+		if ownedNodes[item.ID] == row.FlowID && row.FlowID > 0 {
+			row.ID = item.ID
+			if err := tx.Save(&row).Error; err != nil {
+				return err
+			}
+		} else {
+			if err := tx.Create(&row).Error; err != nil {
+				return err
+			}
 		}
 		nodeMap[item.ID] = row.ID
 	}
@@ -474,7 +522,19 @@ func (r *BackupRepository) restore(tx *gorm.DB, p *backupPayload, same bool) err
 		row := item
 		row.SourceIDs = remapJSONIDs(row.SourceIDs, sourceMap)
 		row.TargetSinkIDs = remapJSONIDs(row.TargetSinkIDs, sinkMap)
+		var err error
+		row.FilterIDs, err = remapRequiredJSONIDs(row.FilterIDs, filterMap)
+		if err != nil {
+			return fmt.Errorf("恢复 AI Profile %d: %w", item.ID, err)
+		}
+		row.Conditions, err = remapFilterConditions(row.Conditions, sourceMap)
+		if err != nil {
+			return fmt.Errorf("恢复 AI Profile %d: %w", item.ID, err)
+		}
 		row.FilterID = mappedPtr(row.FilterID, filterMap)
+		if item.FilterID != nil && row.FilterID == nil {
+			return fmt.Errorf("恢复 AI Profile %d: 过滤器引用不存在", item.ID)
+		}
 		row.OutputTemplateID = mappedPtr(row.OutputTemplateID, aiTemplateMap)
 		if _, err := saveConfigRow(tx, &row, item.ID, same); err != nil {
 			return err

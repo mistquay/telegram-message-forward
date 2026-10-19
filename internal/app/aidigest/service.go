@@ -456,16 +456,13 @@ func normalizeProfileFilterIDs(p *domainaidigest.Profile) []int64 {
 	ids := make([]int64, 0, len(p.FilterIDs)+1)
 	seen := map[int64]struct{}{}
 	for _, id := range p.FilterIDs {
-		if id <= 0 {
-			continue
-		}
 		if _, ok := seen[id]; ok {
 			continue
 		}
 		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
-	if len(ids) == 0 && p.FilterID > 0 {
+	if len(ids) == 0 && p.FilterID != 0 {
 		ids = append(ids, p.FilterID)
 	}
 	return ids
@@ -993,6 +990,9 @@ func (s *Service) filterMessages(ctx context.Context, p *domainaidigest.Profile,
 		if reason == "" {
 			ok, filters, conditions, err := snapshot.Evaluate(ctx, msg, ids, p.Conditions)
 			item.FilterTrace = decision.Node{Type: "filter", Status: "passed", Filters: filters, Conditions: conditions}
+			if len(ids) == 0 {
+				item.FilterTrace.ConfigSnapshot, _ = json.Marshal(p.Conditions)
+			}
 			if !ok {
 				item.FilterTrace.Status = "blocked"
 			}
@@ -1313,6 +1313,14 @@ func (s *Service) validateProfile(ctx context.Context, p *domainaidigest.Profile
 		}
 	}
 	p.FilterIDs = normalizeProfileFilterIDs(p)
+	for i, id := range p.FilterIDs {
+		if id <= 0 {
+			return &condition.ValidationError{Path: fmt.Sprintf("filter_ids.%d", i), Message: "共享过滤器 ID 必须为正整数"}
+		}
+	}
+	if len(p.FilterIDs) > filterset.MaxReferences {
+		return fmt.Errorf("AI Profile 最多引用 %d 个共享过滤器", filterset.MaxReferences)
+	}
 	if len(p.FilterIDs) > 0 {
 		p.FilterID = p.FilterIDs[0]
 	} else {

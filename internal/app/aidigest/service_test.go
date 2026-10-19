@@ -439,8 +439,8 @@ func (r *memoryDigestRepo) AggregateGlobalStatsSince(context.Context, time.Time)
 
 func TestNormalizeProfileFilterIDs(t *testing.T) {
 	got := normalizeProfileFilterIDs(&domainaidigest.Profile{FilterID: 3, FilterIDs: []int64{1, 0, 1, 2}})
-	if len(got) != 2 || got[0] != 1 || got[1] != 2 {
-		t.Fatalf("应去重且忽略 0，不追加 legacy: %v", got)
+	if len(got) != 3 || got[0] != 1 || got[1] != 0 || got[2] != 2 {
+		t.Fatalf("应去重并保留非法 ID 交给校验器拒绝，不追加 legacy: %v", got)
 	}
 	legacy := normalizeProfileFilterIDs(&domainaidigest.Profile{FilterID: 9})
 	if len(legacy) != 1 || legacy[0] != 9 {
