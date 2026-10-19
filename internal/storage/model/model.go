@@ -155,11 +155,37 @@ type Filter struct {
 	Name        string
 	Description string
 	Conditions  datatypes.JSON
+	Revision    int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
 
 func (Filter) TableName() string { return "filters" }
+
+type FilterVersion struct {
+	FilterID    int64 `gorm:"primaryKey"`
+	Revision    int   `gorm:"primaryKey"`
+	Name        string
+	Description string
+	Conditions  datatypes.JSON
+	CreatedAt   time.Time
+}
+
+func (FilterVersion) TableName() string { return "filter_versions" }
+
+type MessageDecision struct {
+	ID              int64 `gorm:"primaryKey"`
+	MessageID       int64
+	SourceID        int64
+	MessageRevision int
+	Trigger         string
+	Status          string
+	FilterIDs       datatypes.JSON
+	Evaluation      datatypes.JSON
+	CreatedAt       time.Time
+}
+
+func (MessageDecision) TableName() string { return "message_decisions" }
 
 // Flow 对应 flows 表。
 type Flow struct {
@@ -348,6 +374,7 @@ type AIDigestRunItem struct {
 	Score           *float64
 	SortOrder       int
 	MessageSnapshot datatypes.JSON
+	FilterTrace     datatypes.JSON
 }
 
 func (AIDigestRunItem) TableName() string { return "ai_digest_run_items" }

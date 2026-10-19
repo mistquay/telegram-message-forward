@@ -4,6 +4,7 @@ package aidigest
 import (
 	"context"
 	"errors"
+	"telegram-message-forward/internal/domain/decision"
 	"time"
 
 	domainflow "telegram-message-forward/internal/domain/flow"
@@ -207,6 +208,7 @@ type DeliveryTaskSummary struct {
 }
 
 type RunItem struct {
+	FilterTrace     decision.Node
 	RunID           int64
 	MessageID       int64
 	SourceID        int64

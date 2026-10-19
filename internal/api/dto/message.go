@@ -1,6 +1,7 @@
 package dto
 
 import (
+	"telegram-message-forward/internal/domain/decision"
 	"time"
 
 	domainmessage "telegram-message-forward/internal/domain/message"
@@ -59,6 +60,7 @@ type MessageDeliveryRefDTO struct {
 type MessageDetailDTO struct {
 	Message    MessageDTO              `json:"message"`
 	Deliveries []MessageDeliveryRefDTO `json:"deliveries"`
+	Decisions  []decision.Record       `json:"decisions"`
 }
 
 func NewMessageDTO(item *domainmessage.ListItem) MessageDTO {
@@ -96,5 +98,9 @@ func NewMessageDetailDTO(detail *domainmessage.Detail) MessageDetailDTO {
 			CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 		})
 	}
-	return MessageDetailDTO{Message: NewMessageDTO(detail.Item), Deliveries: deliveries}
+	decisions := detail.Decisions
+	if decisions == nil {
+		decisions = []decision.Record{}
+	}
+	return MessageDetailDTO{Message: NewMessageDTO(detail.Item), Deliveries: deliveries, Decisions: decisions}
 }

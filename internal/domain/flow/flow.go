@@ -59,8 +59,10 @@ type Edge struct {
 // ConditionConfig 是一个条件的配置。
 // Type 对应 condition 注册表中的条件类型，如 keyword_contains、regex 等。
 type ConditionConfig struct {
-	Type   string         `json:"type"`
-	Config map[string]any `json:"config,omitempty"`
+	Type     string            `json:"type"`
+	Config   map[string]any    `json:"config,omitempty"`
+	Negate   bool              `json:"negate,omitempty"`
+	Children []ConditionConfig `json:"children,omitempty"`
 }
 
 // ProcessorConfig 是一个处理器的配置。

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"telegram-message-forward/internal/domain/decision"
 
 	domainmessage "telegram-message-forward/internal/domain/message"
 )
@@ -12,8 +13,11 @@ import (
 var ErrInvalidQuery = errors.New("消息查询条件无效")
 
 type Service struct {
-	repo domainmessage.QueryRepository
+	repo      domainmessage.QueryRepository
+	decisions decision.Repository
 }
+
+func (s *Service) UseDecisions(repo decision.Repository) *Service { s.decisions = repo; return s }
 
 func NewService(repo domainmessage.QueryRepository) *Service {
 	return &Service{repo: repo}
@@ -40,5 +44,12 @@ func (s *Service) Get(ctx context.Context, id int64) (*domainmessage.Detail, err
 	if id <= 0 {
 		return nil, ErrInvalidQuery
 	}
-	return s.repo.GetDetail(ctx, id)
+	detail, err := s.repo.GetDetail(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if s.decisions != nil {
+		detail.Decisions, _, err = s.decisions.List(ctx, decision.Query{MessageID: id, Limit: 30})
+	}
+	return detail, err
 }

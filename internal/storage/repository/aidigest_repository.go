@@ -343,6 +343,11 @@ func (r *AIDigestRepository) AddRunItems(ctx context.Context, items []*domainaid
 			SortOrder:       item.SortOrder,
 			MessageSnapshot: snapshotJSON,
 		})
+		traceJSON, err := marshalJSON(item.FilterTrace)
+		if err != nil {
+			return err
+		}
+		ms[len(ms)-1].FilterTrace = traceJSON
 	}
 	return r.db.WithContext(ctx).CreateInBatches(&ms, aiDigestRunItemBatchSize).Error
 }
@@ -369,6 +374,11 @@ func (r *AIDigestRepository) ListRunItems(ctx context.Context, runID int64) ([]*
 			Reason:    rows[i].Reason,
 			Score:     rows[i].Score,
 			SortOrder: rows[i].SortOrder,
+		}
+		if len(rows[i].FilterTrace) > 0 {
+			if err := unmarshalJSON(rows[i].FilterTrace, &item.FilterTrace); err != nil {
+				return nil, err
+			}
 		}
 		if snapshot.ID > 0 {
 			item.MessageSnapshot = &snapshot

@@ -8,10 +8,12 @@ import (
 	"sync"
 	"time"
 
+	"telegram-message-forward/internal/domain/decision"
 	domainfilter "telegram-message-forward/internal/domain/filter"
 	domainflow "telegram-message-forward/internal/domain/flow"
 	domainmessage "telegram-message-forward/internal/domain/message"
 	"telegram-message-forward/internal/ruleengine/condition"
+	"telegram-message-forward/internal/ruleengine/filterset"
 	"telegram-message-forward/internal/ruleengine/processor"
 )
 
@@ -66,39 +68,109 @@ type Plan struct {
 }
 
 func (e *Engine) Evaluate(ctx context.Context, msg *domainmessage.NormalizedMessage, flows []*domainflow.Flow) ([]domainflow.Match, error) {
+	matches, _, err := e.EvaluateDetailed(ctx, msg, flows)
+	return matches, err
+}
+
+func (e *Engine) EvaluateDetailed(ctx context.Context, msg *domainmessage.NormalizedMessage, flows []*domainflow.Flow) (matches []domainflow.Match, result decision.Evaluation, err error) {
+	start := time.Now()
+	result = decision.Evaluation{Version: 1, Status: "no_flow", Flows: []decision.Flow{}, Targets: []decision.Target{}}
+	defer func() {
+		result.DurationUS = time.Since(start).Microseconds()
+		if err != nil {
+			result.Status = "error"
+			if result.Reason == "" {
+				result.Reason = "evaluation_failed"
+			}
+		}
+	}()
 	if msg == nil {
-		return nil, nil
+		return nil, result, nil
 	}
 	ordered := append([]*domainflow.Flow(nil), flows...)
 	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i] == nil || ordered[j] == nil {
+			return ordered[j] == nil && ordered[i] != nil
+		}
 		if ordered[i].Priority == ordered[j].Priority {
 			return ordered[i].ID < ordered[j].ID
 		}
 		return ordered[i].Priority > ordered[j].Priority
 	})
 
-	var matches []domainflow.Match
+	ids := []int64{}
 	for _, f := range ordered {
 		if f == nil || !f.Enabled {
 			continue
 		}
+		for _, n := range f.Nodes {
+			ids = append(ids, n.Config.FilterIDs...)
+		}
+	}
+	snapshot, resolveErr := filterset.Resolve(ctx, e.filters, ids)
+	if resolveErr != nil {
+		result.Reason = "filter_resolution_failed"
+		for _, f := range ordered {
+			if f == nil || !f.Enabled {
+				continue
+			}
+			trace := decision.Flow{ID: f.ID, Name: f.Name, Version: f.UpdatedAt.UTC().Format(time.RFC3339Nano), Status: "error", Reason: "filter_resolution_failed", Nodes: []decision.Node{}}
+			for _, n := range f.Nodes {
+				if len(n.Config.FilterIDs) == 0 {
+					continue
+				}
+				step := decision.Node{NodeID: n.ID, Type: "filter", Status: "error", Reason: "filter_resolution_failed"}
+				for _, id := range n.Config.FilterIDs {
+					step.Filters = append(step.Filters, decision.Filter{ID: id, Result: decision.Condition{Type: "all", Status: "error", Reason: "filter_resolution_failed"}})
+				}
+				trace.Nodes = append(trace.Nodes, step)
+			}
+			result.Flows = append(result.Flows, trace)
+		}
+		return nil, result, resolveErr
+	}
+	stopped := false
+	for _, f := range ordered {
+		if f == nil || !f.Enabled {
+			continue
+		}
+		trace := decision.Flow{ID: f.ID, Name: f.Name, Version: f.UpdatedAt.UTC().Format(time.RFC3339Nano), Nodes: []decision.Node{}, Status: "skipped"}
+		if stopped {
+			trace.Reason = "stop_on_match"
+			result.Flows = append(result.Flows, trace)
+			continue
+		}
+		result.Status = "blocked"
 		plan, err := e.compileCached(f)
 		if err != nil {
-			return nil, err
+			trace.Status, trace.Reason = "error", "compile_failed"
+			result.Flows = append(result.Flows, trace)
+			return nil, result, err
 		}
-		got, err := e.evaluatePlan(ctx, msg, plan)
+		got, err := e.evaluatePlan(ctx, msg, plan, snapshot, &trace)
+		trace.Status = "blocked"
+		if len(got) > 0 {
+			trace.Status = "matched"
+		}
 		if err != nil {
-			return nil, err
+			trace.Status, trace.Reason = "error", "node_execution_failed"
+		}
+		result.Flows = append(result.Flows, trace)
+		if err != nil {
+			return nil, result, err
 		}
 		if len(got) == 0 {
 			continue
 		}
 		matches = append(matches, got...)
 		if f.StopOnMatch {
-			break
+			stopped = true
 		}
 	}
-	return matches, nil
+	if len(matches) > 0 {
+		result.Status = "matched"
+	}
+	return matches, result, nil
 }
 
 func (e *Engine) Compile(f *domainflow.Flow) (*Plan, error) {
@@ -284,10 +356,8 @@ func validateNode(n domainflow.Node) error {
 		if len(n.Config.FilterIDs) == 0 && len(n.Config.Conditions) == 0 {
 			return fmt.Errorf("filter 节点至少需要 filter_ids 或 conditions: node=%d", n.ID)
 		}
-		for _, cfg := range n.Config.Conditions {
-			if err := condition.ValidateConfig(cfg.Type, cfg.Config); err != nil {
-				return fmt.Errorf("filter 节点条件 %s 配置无效: %w", cfg.Type, err)
-			}
+		if _, err := condition.Compile(n.Config.Conditions); err != nil {
+			return fmt.Errorf("filter 节点条件配置无效 node=%d: %w", n.ID, err)
 		}
 	case domainflow.NodeTypeProcessor:
 		if len(n.Config.Processors) == 0 {
@@ -372,7 +442,7 @@ type evalState struct {
 	msg    *domainmessage.NormalizedMessage
 }
 
-func (e *Engine) evaluatePlan(ctx context.Context, msg *domainmessage.NormalizedMessage, p *Plan) ([]domainflow.Match, error) {
+func (e *Engine) evaluatePlan(ctx context.Context, msg *domainmessage.NormalizedMessage, p *Plan, snapshot filterset.Snapshot, trace *decision.Flow) ([]domainflow.Match, error) {
 	starts := p.sourceIDs[msg.SourceID]
 	if len(starts) == 0 {
 		return nil, nil
@@ -383,11 +453,23 @@ func (e *Engine) evaluatePlan(ctx context.Context, msg *domainmessage.Normalized
 	}
 	seenTargets := map[int64]bool{}
 	var matches []domainflow.Match
+	visited := map[int64]bool{}
 	for len(queue) > 0 {
+		if len(trace.Nodes) >= 512 {
+			return nil, fmt.Errorf("Flow 执行路径超过 512 步")
+		}
 		state := queue[0]
 		queue = queue[1:]
 		node := p.nodes[state.nodeID]
-		current, produced, err := e.evalNode(ctx, p.flow, node, state.msg, seenTargets)
+		visited[node.ID] = true
+		step := decision.Node{NodeID: node.ID, Type: string(node.Type), Status: "passed"}
+		started := time.Now()
+		current, produced, err := e.evalNode(ctx, p.flow, node, state.msg, seenTargets, snapshot, &step)
+		step.DurationUS = time.Since(started).Microseconds()
+		if err != nil {
+			step.Status, step.Reason = "error", "node_execution_failed"
+		}
+		trace.Nodes = append(trace.Nodes, step)
 		if err != nil {
 			return nil, err
 		}
@@ -403,15 +485,24 @@ func (e *Engine) evaluatePlan(ctx context.Context, msg *domainmessage.Normalized
 			queue = append(queue, evalState{nodeID: to, msg: cloneMessage(current)})
 		}
 	}
+	for _, node := range p.flow.Nodes {
+		if !visited[node.ID] {
+			trace.Nodes = append(trace.Nodes, decision.Node{NodeID: node.ID, Type: string(node.Type), Status: "skipped", Reason: "path_not_reached"})
+		}
+	}
 	return matches, nil
 }
 
-func (e *Engine) evalNode(ctx context.Context, f *domainflow.Flow, n domainflow.Node, msg *domainmessage.NormalizedMessage, seenTargets map[int64]bool) (*domainmessage.NormalizedMessage, *domainflow.Match, error) {
+func (e *Engine) evalNode(ctx context.Context, f *domainflow.Flow, n domainflow.Node, msg *domainmessage.NormalizedMessage, seenTargets map[int64]bool, snapshot filterset.Snapshot, step *decision.Node) (*domainmessage.NormalizedMessage, *domainflow.Match, error) {
 	switch n.Type {
 	case domainflow.NodeTypeSource:
 		return msg, nil, nil
 	case domainflow.NodeTypeFilter:
-		ok, err := e.evalFilter(ctx, msg, n)
+		ok, filters, conditions, err := snapshot.Evaluate(ctx, msg, n.Config.FilterIDs, n.Config.Conditions)
+		step.Filters, step.Conditions = filters, conditions
+		if !ok {
+			step.Status = "blocked"
+		}
 		if err != nil || !ok {
 			return nil, nil, err
 		}
@@ -423,9 +514,11 @@ func (e *Engine) evalNode(ctx context.Context, f *domainflow.Flow, n domainflow.
 		return msg, nil, nil
 	case domainflow.NodeTypeTarget:
 		if seenTargets[n.ID] {
+			step.Status, step.Reason = "skipped", "target_deduplicated"
 			return nil, nil, nil
 		}
 		seenTargets[n.ID] = true
+		step.Status = "matched"
 		if n.RefID == nil {
 			return nil, nil, fmt.Errorf("target 节点缺少 ref_id: node=%d", n.ID)
 		}
@@ -442,31 +535,6 @@ func (e *Engine) evalNode(ctx context.Context, f *domainflow.Flow, n domainflow.
 	default:
 		return nil, nil, fmt.Errorf("未知节点类型 %q: node=%d", n.Type, n.ID)
 	}
-}
-
-func (e *Engine) evalFilter(ctx context.Context, msg *domainmessage.NormalizedMessage, n domainflow.Node) (bool, error) {
-	conds := append([]domainflow.ConditionConfig(nil), n.Config.Conditions...)
-	for _, filterID := range n.Config.FilterIDs {
-		if e.filters == nil {
-			return false, fmt.Errorf("filter 节点引用共享过滤器但未配置 resolver: node=%d", n.ID)
-		}
-		f, err := e.filters.GetByID(ctx, filterID)
-		if err != nil {
-			return false, fmt.Errorf("加载共享过滤器失败 id=%d: %w", filterID, err)
-		}
-		conds = append(conds, f.Conditions...)
-	}
-	for _, cfg := range conds {
-		c, err := condition.Get(cfg.Type)
-		if err != nil {
-			return false, err
-		}
-		ok, err := c.Evaluate(ctx, msg, cfg.Config)
-		if err != nil || !ok {
-			return ok, err
-		}
-	}
-	return true, nil
 }
 
 func runProcessors(ctx context.Context, msg *domainmessage.NormalizedMessage, configs []domainflow.ProcessorConfig) error {

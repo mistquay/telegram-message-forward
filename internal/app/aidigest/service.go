@@ -19,6 +19,7 @@ import (
 
 	appdelivery "telegram-message-forward/internal/app/delivery"
 	domainaidigest "telegram-message-forward/internal/domain/aidigest"
+	"telegram-message-forward/internal/domain/decision"
 	domaindelivery "telegram-message-forward/internal/domain/delivery"
 	domainfilter "telegram-message-forward/internal/domain/filter"
 	domainflow "telegram-message-forward/internal/domain/flow"
@@ -30,6 +31,7 @@ import (
 	"telegram-message-forward/internal/infra/clock"
 	"telegram-message-forward/internal/infra/mediastore"
 	"telegram-message-forward/internal/ruleengine/condition"
+	"telegram-message-forward/internal/ruleengine/filterset"
 )
 
 const defaultPrompt = `请整理以下窗口内的消息，输出重点摘要、分类列表和来源编号。
@@ -445,29 +447,6 @@ func validateOutputTemplate(t *domainaidigest.OutputTemplate) error {
 		return fmt.Errorf("不支持的模板格式: %s", t.Format)
 	}
 	return nil
-}
-
-// resolveConditions 合并共享过滤器条件（多过滤器 AND：条件列表拼接后全部求值），否则回退内联条件。
-func (s *Service) resolveConditions(ctx context.Context, p *domainaidigest.Profile) ([]domainflow.ConditionConfig, error) {
-	ids := normalizeProfileFilterIDs(p)
-	if len(ids) > 0 {
-		if s.filters == nil {
-			return nil, errors.New("共享过滤器解析器未配置")
-		}
-		var out []domainflow.ConditionConfig
-		for _, id := range ids {
-			f, err := s.filters.GetByID(ctx, id)
-			if err != nil {
-				return nil, fmt.Errorf("加载共享过滤器失败 id=%d: %w", id, err)
-			}
-			if f == nil || len(f.Conditions) == 0 {
-				return nil, fmt.Errorf("共享过滤器不存在或条件为空 id=%d", id)
-			}
-			out = append(out, f.Conditions...)
-		}
-		return out, nil
-	}
-	return p.Conditions, nil
 }
 
 func normalizeProfileFilterIDs(p *domainaidigest.Profile) []int64 {
@@ -988,13 +967,14 @@ func (s *Service) createDeliveryTasks(ctx context.Context, p *domainaidigest.Pro
 
 func (s *Service) filterMessages(ctx context.Context, p *domainaidigest.Profile, runID int64, msgs []*domainmessage.NormalizedMessage) ([]*domainaidigest.RunItem, []*domainmessage.NormalizedMessage, error) {
 	limits := normalizedLimits(p.Limits)
-	conditions, err := s.resolveConditions(ctx, p)
+	ids := normalizeProfileFilterIDs(p)
+	snapshot, err := filterset.Resolve(ctx, s.filters, ids)
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, cfg := range conditions {
-		if err := condition.ValidateConfig(cfg.Type, cfg.Config); err != nil {
-			return nil, nil, fmt.Errorf("过滤条件配置无效: %w", err)
+	if len(ids) == 0 {
+		if _, err := condition.Compile(p.Conditions); err != nil {
+			return nil, nil, err
 		}
 	}
 	items := make([]*domainaidigest.RunItem, 0, len(msgs))
@@ -1011,7 +991,11 @@ func (s *Service) filterMessages(ctx context.Context, p *domainaidigest.Profile,
 			reason = "empty_text"
 		}
 		if reason == "" {
-			ok, err := s.matchesConditions(ctx, msg, conditions)
+			ok, filters, conditions, err := snapshot.Evaluate(ctx, msg, ids, p.Conditions)
+			item.FilterTrace = decision.Node{Type: "filter", Status: "passed", Filters: filters, Conditions: conditions}
+			if !ok {
+				item.FilterTrace.Status = "blocked"
+			}
 			if err != nil {
 				return nil, nil, fmt.Errorf("过滤条件执行失败: %w", err)
 			} else if !ok {
@@ -1047,17 +1031,12 @@ func (s *Service) filterMessages(ctx context.Context, p *domainaidigest.Profile,
 }
 
 func (s *Service) matchesConditions(ctx context.Context, msg *domainmessage.NormalizedMessage, configs []domainflow.ConditionConfig) (bool, error) {
-	for _, cfg := range configs {
-		c, err := condition.Get(cfg.Type)
-		if err != nil {
-			return false, err
-		}
-		ok, err := c.Evaluate(ctx, msg, cfg.Config)
-		if err != nil || !ok {
-			return ok, err
-		}
+	p, err := condition.Compile(configs)
+	if err != nil {
+		return false, err
 	}
-	return true, nil
+	r, err := p.Evaluate(ctx, msg)
+	return r.Status == "passed", err
 }
 
 func (s *Service) buildPrompt(ctx context.Context, p *domainaidigest.Profile, run *domainaidigest.Run, msgs []*domainmessage.NormalizedMessage) string {
@@ -1348,10 +1327,8 @@ func (s *Service) validateProfile(ctx context.Context, p *domainaidigest.Profile
 	}
 	p.Dedupe.Enabled = true
 	p.Limits = normalizedLimits(p.Limits)
-	for _, cfg := range p.Conditions {
-		if err := condition.ValidateConfig(cfg.Type, cfg.Config); err != nil {
-			return fmt.Errorf("条件 %s 配置无效: %w", cfg.Type, err)
-		}
+	if _, err := condition.Compile(p.Conditions); err != nil {
+		return err
 	}
 	for _, id := range p.TargetSinkIDs {
 		if _, err := s.sinks.GetByID(ctx, id); err != nil {

@@ -15,6 +15,7 @@ type Filter struct {
 	Name        string
 	Description string
 	Conditions  []domainflow.ConditionConfig
+	Revision    int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }

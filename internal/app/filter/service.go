@@ -54,6 +54,7 @@ func (s *Service) Update(ctx context.Context, id int64, in Input) (*domainfilter
 	}
 	f := fromInput(id, in)
 	f.CreatedAt = existing.CreatedAt
+	f.Revision = existing.Revision
 	if err := s.validate(f); err != nil {
 		return nil, err
 	}
@@ -90,10 +91,6 @@ func (s *Service) validate(f *domainfilter.Filter) error {
 	if len(f.Conditions) == 0 {
 		return errors.New("过滤器至少需要一个匹配条件")
 	}
-	for _, cfg := range f.Conditions {
-		if err := condition.ValidateConfig(cfg.Type, cfg.Config); err != nil {
-			return fmt.Errorf("条件 %s 配置无效: %w", cfg.Type, err)
-		}
-	}
-	return nil
+	_, err := condition.Compile(f.Conditions)
+	return err
 }

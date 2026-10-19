@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"telegram-message-forward/internal/domain/decision"
 	"time"
 )
 
@@ -176,6 +177,7 @@ type DeliveryRef struct {
 type Detail struct {
 	Item       *ListItem
 	Deliveries []DeliveryRef
+	Decisions  []decision.Record
 }
 
 // QueryRepository 是消息中心使用的只读仓储接口，与实时采集写入契约分离。

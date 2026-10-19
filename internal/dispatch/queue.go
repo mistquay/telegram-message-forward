@@ -3,6 +3,7 @@ package dispatch
 
 import (
 	"context"
+	"telegram-message-forward/internal/domain/decision"
 
 	domaindelivery "telegram-message-forward/internal/domain/delivery"
 	domainflow "telegram-message-forward/internal/domain/flow"
@@ -40,6 +41,11 @@ func (q *Queue) UseSinks(sinks domainsink.Repository) *Queue {
 //
 // Flow 任务按 (message_id, origin_type, origin_id, origin_node_id, message_revision) 幂等。
 func (q *Queue) Enqueue(ctx context.Context, msg *domainmessage.NormalizedMessage, matches []domainflow.Match) error {
+	_, err := q.EnqueueDetailed(ctx, msg, matches)
+	return err
+}
+
+func (q *Queue) EnqueueDetailed(ctx context.Context, msg *domainmessage.NormalizedMessage, matches []domainflow.Match) (out []decision.Target, err error) {
 	revision := msg.ContentRevision
 	if revision <= 0 {
 		revision = 1
@@ -50,9 +56,10 @@ func (q *Queue) Enqueue(ctx context.Context, msg *domainmessage.NormalizedMessag
 		for _, target := range m.Targets {
 			enabled, err := q.sinkEnabled(ctx, target.SinkID, enabledSinks)
 			if err != nil {
-				return err
+				return out, err
 			}
 			if !enabled {
+				out = append(out, decision.Target{FlowID: m.OriginID, NodeID: m.OriginNodeID, SinkID: target.SinkID, Status: "skipped", Reason: "sink_disabled"})
 				continue
 			}
 			task := &domaindelivery.Task{
@@ -68,38 +75,46 @@ func (q *Queue) Enqueue(ctx context.Context, msg *domainmessage.NormalizedMessag
 				MessageSnapshot: m.Message,
 			}
 			if err := q.tasks.Create(ctx, task); err != nil {
-				return err
+				return out, err
 			}
+			out = append(out, decision.Target{FlowID: m.OriginID, NodeID: m.OriginNodeID, SinkID: target.SinkID, TaskID: task.ID, Status: "enqueued"})
 			created = true
 		}
 	}
 	if created {
 		q.notifier.Notify()
 	}
-	return nil
+	return out, nil
 }
 
 // EnqueueEdit 仅向历史路由与当前匹配结果的交集补发，历史路由不代表当前授权。
 func (q *Queue) EnqueueEdit(ctx context.Context, msg *domainmessage.NormalizedMessage, matches []domainflow.Match, suffix string) error {
+	_, err := q.EnqueueEditDetailed(ctx, msg, matches, suffix)
+	return err
+}
+
+func (q *Queue) EnqueueEditDetailed(ctx context.Context, msg *domainmessage.NormalizedMessage, matches []domainflow.Match, suffix string) (out []decision.Target, err error) {
 	if msg == nil || msg.ID <= 0 || msg.ContentRevision <= 1 {
-		return nil
+		return out, nil
 	}
 	routes, err := q.tasks.ListFlowRoutesByMessage(ctx, msg.ID)
 	if err != nil {
-		return err
+		return out, err
 	}
 	created := false
 	enabledSinks := map[int64]bool{}
 	for _, route := range routes {
 		candidate := matchMessageForRoute(matches, route)
 		if candidate == nil {
+			out = append(out, decision.Target{FlowID: route.OriginID, NodeID: route.OriginNodeID, SinkID: route.SinkID, Status: "skipped", Reason: "edit_route_not_matched"})
 			continue
 		}
 		enabled, err := q.sinkEnabled(ctx, route.SinkID, enabledSinks)
 		if err != nil {
-			return err
+			return out, err
 		}
 		if !enabled {
+			out = append(out, decision.Target{FlowID: route.OriginID, NodeID: route.OriginNodeID, SinkID: route.SinkID, Status: "skipped", Reason: "sink_disabled"})
 			continue
 		}
 		snapshot := *candidate
@@ -119,14 +134,15 @@ func (q *Queue) EnqueueEdit(ctx context.Context, msg *domainmessage.NormalizedMe
 			MessageSnapshot: &snapshot,
 		}
 		if err := q.tasks.Create(ctx, task); err != nil {
-			return err
+			return out, err
 		}
+		out = append(out, decision.Target{FlowID: route.OriginID, NodeID: route.OriginNodeID, SinkID: route.SinkID, TaskID: task.ID, Status: "enqueued"})
 		created = true
 	}
 	if created {
 		q.notifier.Notify()
 	}
-	return nil
+	return out, nil
 }
 
 func matchMessageForRoute(matches []domainflow.Match, route domaindelivery.FlowRoute) *domainmessage.NormalizedMessage {

@@ -10,6 +10,7 @@ import (
 
 // FilterDTO 是过滤器响应。
 type FilterDTO struct {
+	Revision    int                          `json:"revision"`
 	ID          int64                        `json:"id"`
 	Name        string                       `json:"name"`
 	Description string                       `json:"description"`
@@ -24,6 +25,7 @@ func NewFilterDTO(f *domainfilter.Filter) FilterDTO {
 		conds = []domainflow.ConditionConfig{}
 	}
 	return FilterDTO{
+		Revision:    f.Revision,
 		ID:          f.ID,
 		Name:        f.Name,
 		Description: f.Description,

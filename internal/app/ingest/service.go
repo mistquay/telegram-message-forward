@@ -6,9 +6,11 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"telegram-message-forward/internal/dispatch"
+	"telegram-message-forward/internal/domain/decision"
 	domainflow "telegram-message-forward/internal/domain/flow"
 	domainmessage "telegram-message-forward/internal/domain/message"
 	"telegram-message-forward/internal/flowengine"
@@ -31,6 +33,7 @@ type Service struct {
 	log        *slog.Logger
 	media      mediastore.Store
 	cursors    sourceCursor
+	decisions  decision.Repository
 }
 
 // NewService 创建 ingest 服务。
@@ -60,6 +63,8 @@ func (s *Service) UseSourceCursor(c sourceCursor) *Service {
 	return s
 }
 
+func (s *Service) UseDecisions(repo decision.Repository) *Service { s.decisions = repo; return s }
+
 // Ingest 处理一条标准化消息：幂等落库 → 求值 Flow → 生成投递任务。
 //
 // 落库使用 (source_id, external_message_id) 幂等约束；重复消息不会重复投递。
@@ -88,24 +93,7 @@ func (s *Service) Ingest(ctx context.Context, msg *domainmessage.NormalizedMessa
 		}
 	}
 
-	matches, err := s.evaluate(ctx, msg)
-	if err != nil {
-		return err
-	}
-	if len(matches) == 0 {
-		return nil
-	}
-
-	if err := s.queue.Enqueue(ctx, msg, matches); err != nil {
-		return err
-	}
-
-	s.log.Info("消息已入队投递",
-		"message_id", msg.ID,
-		"source_id", msg.SourceID,
-		"matched_flows", len(matches),
-	)
-	return nil
+	return s.process(ctx, msg, false)
 }
 
 func (s *Service) ingestEdit(ctx context.Context, msg *domainmessage.NormalizedMessage) error {
@@ -131,31 +119,60 @@ func (s *Service) ingestEdit(ctx context.Context, msg *domainmessage.NormalizedM
 	if !result.Changed {
 		return nil
 	}
-	matches, err := s.evaluate(ctx, msg)
-	if err != nil {
-		return err
-	}
-	if err := s.queue.EnqueueEdit(ctx, msg, matches, msg.EditTextSuffix); err != nil {
-		return err
-	}
-	s.log.Info("Telegram 编辑消息已入队补发",
-		"message_id", msg.ID,
-		"source_id", msg.SourceID,
-		"external_id", msg.ExternalMessageID,
-		"revision", msg.ContentRevision,
-	)
-	return nil
+	return s.process(ctx, msg, true)
 }
 
-func (s *Service) evaluate(ctx context.Context, msg *domainmessage.NormalizedMessage) ([]domainflow.Match, error) {
+func (s *Service) evaluate(ctx context.Context, msg *domainmessage.NormalizedMessage) ([]domainflow.Match, decision.Evaluation, error) {
+	result := decision.Evaluation{Version: 1, Status: "no_flow", Flows: []decision.Flow{}, Targets: []decision.Target{}}
 	if s.flows == nil || s.flowEngine == nil {
-		return nil, nil
+		return nil, result, nil
 	}
 	flows, err := s.flows.ListEnabledBySource(ctx, msg.SourceID)
 	if err != nil || len(flows) == 0 {
-		return nil, err
+		if err != nil {
+			result.Status, result.Reason = "error", "flow_load_failed"
+		}
+		return nil, result, err
 	}
-	return s.flowEngine.Evaluate(ctx, msg, flows)
+	return s.flowEngine.EvaluateDetailed(ctx, msg, flows)
+}
+
+func (s *Service) process(ctx context.Context, msg *domainmessage.NormalizedMessage, edit bool) error {
+	matches, result, err := s.evaluate(ctx, msg)
+	trigger := "new"
+	if edit {
+		trigger = "edit"
+	}
+	if err == nil {
+		if edit {
+			result.Targets, err = s.queue.EnqueueEditDetailed(ctx, msg, matches, msg.EditTextSuffix)
+		} else if len(matches) > 0 {
+			result.Targets, err = s.queue.EnqueueDetailed(ctx, msg, matches)
+		}
+		if err != nil {
+			result.Status, result.Reason = "error", "enqueue_failed"
+		} else if len(result.Targets) > 0 {
+			result.Status = "not_enqueued"
+			for _, target := range result.Targets {
+				if target.Status == "enqueued" {
+					result.Status = "enqueued"
+					break
+				}
+			}
+		}
+	}
+	if s.decisions != nil {
+		revision := msg.ContentRevision
+		if revision <= 0 {
+			revision = 1
+		}
+		record := &decision.Record{MessageID: msg.ID, SourceID: msg.SourceID, MessageRevision: revision, Trigger: trigger, Evaluation: result}
+		if saveErr := s.decisions.Create(ctx, record); saveErr != nil {
+			err = errors.Join(err, saveErr)
+		}
+	}
+	s.log.Info("消息处理完成", "message_id", msg.ID, "source_id", msg.SourceID, "revision", msg.ContentRevision, "trigger", trigger, "result", result.Status)
+	return err
 }
 
 // persistMedia 把 Source 下载到临时目录的媒体文件移入媒体存储，

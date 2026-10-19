@@ -318,7 +318,7 @@ func (timeWindow) Evaluate(_ context.Context, msg *domainmessage.NormalizedMessa
 		}
 	}
 	t := msg.ReceivedAt
-	if msg.SentAt != nil {
+	if msg.SentAt != nil && configString(config, "time_basis") != "received" {
 		t = *msg.SentAt
 	}
 	local := t.In(loc)

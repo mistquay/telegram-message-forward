@@ -2,9 +2,11 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	domainfilter "telegram-message-forward/internal/domain/filter"
 	domainflow "telegram-message-forward/internal/domain/flow"
@@ -51,10 +53,17 @@ func (r *FilterRepository) Create(ctx context.Context, f *domainfilter.Filter) e
 	if err != nil {
 		return err
 	}
-	if err := r.db.WithContext(ctx).Create(m).Error; err != nil {
+	m.Revision = 1
+	if err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(m).Error; err != nil {
+			return err
+		}
+		return tx.Create(&model.FilterVersion{FilterID: m.ID, Revision: 1, Name: m.Name, Description: m.Description, Conditions: m.Conditions}).Error
+	}); err != nil {
 		return err
 	}
 	f.ID = m.ID
+	f.Revision = m.Revision
 	f.CreatedAt = m.CreatedAt
 	f.UpdatedAt = m.UpdatedAt
 	return nil
@@ -66,14 +75,26 @@ func (r *FilterRepository) Update(ctx context.Context, f *domainfilter.Filter) e
 		return err
 	}
 	now := time.Now()
-	if err := r.db.WithContext(ctx).Model(&model.Filter{}).
-		Where("id = ?", f.ID).
-		Updates(map[string]any{
+	if err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var existing model.Filter
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&existing, f.ID).Error; err != nil {
+			return err
+		}
+		if f.Revision > 0 && f.Revision != existing.Revision {
+			return fmt.Errorf("过滤器已被其他操作修改，请刷新后重试")
+		}
+		f.Revision = existing.Revision + 1
+		if err := tx.Model(&model.Filter{}).Where("id = ?", f.ID).Updates(map[string]any{
 			"name":        f.Name,
 			"description": f.Description,
 			"conditions":  conds,
 			"updated_at":  now,
+			"revision":    f.Revision,
 		}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&model.FilterVersion{FilterID: f.ID, Revision: f.Revision, Name: f.Name, Description: f.Description, Conditions: conds}).Error
+	}); err != nil {
 		return err
 	}
 	f.UpdatedAt = now
@@ -113,6 +134,7 @@ func toFilterModel(f *domainfilter.Filter) (*model.Filter, error) {
 		Name:        f.Name,
 		Description: f.Description,
 		Conditions:  conds,
+		Revision:    f.Revision,
 		CreatedAt:   f.CreatedAt,
 		UpdatedAt:   f.UpdatedAt,
 	}, nil
@@ -128,9 +150,26 @@ func toFilterDomain(m *model.Filter) (*domainfilter.Filter, error) {
 		Name:        m.Name,
 		Description: m.Description,
 		Conditions:  conds,
+		Revision:    m.Revision,
 		CreatedAt:   m.CreatedAt,
 		UpdatedAt:   m.UpdatedAt,
 	}, nil
+}
+
+func (r *FilterRepository) GetByIDs(ctx context.Context, ids []int64) ([]*domainfilter.Filter, error) {
+	var rows []model.Filter
+	if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]*domainfilter.Filter, 0, len(rows))
+	for i := range rows {
+		f, err := toFilterDomain(&rows[i])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, nil
 }
 
 // loadFilterConditions 一次查询取回多个过滤器的条件。

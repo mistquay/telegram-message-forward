@@ -75,6 +75,7 @@ type App struct {
 	mediaStore  *mediastore.Manager
 	settingsSvc *appsettings.Service
 	chatArchive *appchatarchive.Service
+	decisions   *repository.DecisionRepository
 	db          *sql.DB
 	deps        *Deps
 }
@@ -139,6 +140,7 @@ func Build(cfg *config.Config) (*App, error) {
 	filters := repository.NewFilterRepository(db)
 	flows := repository.NewFlowRepository(db)
 	messages := repository.NewMessageRepository(db)
+	decisions := repository.NewDecisionRepository(db)
 	deliveries := repository.NewDeliveryRepository(db)
 	peers := repository.NewTelegramPeerRepository(db)
 	apiTokens := repository.NewAPITokenRepository(db)
@@ -212,6 +214,7 @@ func Build(cfg *config.Config) (*App, error) {
 
 	ingestSvc := appingest.NewService(messages, flows, flowEngine, queue, clk, log).
 		UseMediaStore(mediaStore).
+		UseDecisions(decisions).
 		UseSourceCursor(sources)
 	deliverySvc := appdelivery.NewService(deliveries, appdelivery.DisplayDeps{
 		Messages:  messages,
@@ -220,7 +223,7 @@ func Build(cfg *config.Config) (*App, error) {
 		Flows:     flows,
 		Templates: templates,
 	})
-	messageSvc := appmessage.NewService(messages)
+	messageSvc := appmessage.NewService(messages).UseDecisions(decisions)
 	backupSvc := appbackup.NewService(backups)
 	aiDigestSvc := appaidigest.NewService(appaidigest.Deps{
 		Repo:     aiDigests,
@@ -415,7 +418,8 @@ func Build(cfg *config.Config) (*App, error) {
 		cfg: cfg, log: log, server: server, workers: workers,
 		srcManager: srcManager, tgLogin: tgLoginSvc, aiSched: aiScheduler,
 		mediaStore: mediaStore, settingsSvc: settingsSvc, chatArchive: chatArchiveSvc,
-		db: sqlDB, deps: deps,
+		decisions: decisions,
+		db:        sqlDB, deps: deps,
 	}, nil
 }
 
@@ -497,6 +501,19 @@ func (a *App) runDataArchiveCleanup(ctx context.Context) {
 		return
 	}
 	cleanup := func() {
+		// Decision evidence is kept for 30 days independently of message retention.
+		if a.decisions != nil {
+			for i := 0; i < 100; i++ {
+				n, err := a.decisions.DeleteBefore(ctx, time.Now().Add(-30*24*time.Hour), 500)
+				if err != nil {
+					a.log.Warn("决策记录清理失败", "err", err)
+					break
+				}
+				if n < 500 {
+					break
+				}
+			}
+		}
 		res, err := a.settingsSvc.RunArchiveCleanup(ctx)
 		if err != nil {
 			a.log.Warn("归档清理失败", "err", err)

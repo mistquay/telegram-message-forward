@@ -2,6 +2,7 @@ package dto
 
 import (
 	"encoding/json"
+	"telegram-message-forward/internal/domain/decision"
 	"time"
 
 	appaidigest "telegram-message-forward/internal/app/aidigest"
@@ -283,12 +284,13 @@ func NewAIDigestRunDTO(r *domainaidigest.Run) AIDigestRunDTO {
 }
 
 type AIDigestRunItemDTO struct {
-	MessageID int64                  `json:"message_id"`
-	SourceID  int64                  `json:"source_id"`
-	Included  bool                   `json:"included"`
-	Reason    string                 `json:"reason,omitempty"`
-	SortOrder int                    `json:"sort_order"`
-	Message   *AIDigestMessageRefDTO `json:"message,omitempty"`
+	FilterTrace decision.Node          `json:"filter_trace"`
+	MessageID   int64                  `json:"message_id"`
+	SourceID    int64                  `json:"source_id"`
+	Included    bool                   `json:"included"`
+	Reason      string                 `json:"reason,omitempty"`
+	SortOrder   int                    `json:"sort_order"`
+	Message     *AIDigestMessageRefDTO `json:"message,omitempty"`
 }
 
 type AIDigestMessageRefDTO struct {
@@ -336,11 +338,12 @@ func NewAIDigestRunDetailDTO(d *domainaidigest.RunDetail) AIDigestRunDetailDTO {
 	items := make([]AIDigestRunItemDTO, 0, len(d.Items))
 	for _, item := range d.Items {
 		dto := AIDigestRunItemDTO{
-			MessageID: item.MessageID,
-			SourceID:  item.SourceID,
-			Included:  item.Included,
-			Reason:    item.Reason,
-			SortOrder: item.SortOrder,
+			FilterTrace: item.FilterTrace,
+			MessageID:   item.MessageID,
+			SourceID:    item.SourceID,
+			Included:    item.Included,
+			Reason:      item.Reason,
+			SortOrder:   item.SortOrder,
 		}
 		snapshot := item.MessageSnapshot
 		if snapshot == nil {
