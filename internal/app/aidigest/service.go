@@ -448,22 +448,26 @@ func validateOutputTemplate(t *domainaidigest.OutputTemplate) error {
 }
 
 // resolveConditions 合并共享过滤器条件（多过滤器 AND：条件列表拼接后全部求值），否则回退内联条件。
-func (s *Service) resolveConditions(ctx context.Context, p *domainaidigest.Profile) []domainflow.ConditionConfig {
+func (s *Service) resolveConditions(ctx context.Context, p *domainaidigest.Profile) ([]domainflow.ConditionConfig, error) {
 	ids := normalizeProfileFilterIDs(p)
-	if len(ids) > 0 && s.filters != nil {
+	if len(ids) > 0 {
+		if s.filters == nil {
+			return nil, errors.New("共享过滤器解析器未配置")
+		}
 		var out []domainflow.ConditionConfig
 		for _, id := range ids {
 			f, err := s.filters.GetByID(ctx, id)
-			if err != nil || f == nil {
-				continue
+			if err != nil {
+				return nil, fmt.Errorf("加载共享过滤器失败 id=%d: %w", id, err)
+			}
+			if f == nil || len(f.Conditions) == 0 {
+				return nil, fmt.Errorf("共享过滤器不存在或条件为空 id=%d", id)
 			}
 			out = append(out, f.Conditions...)
 		}
-		if len(out) > 0 {
-			return out
-		}
+		return out, nil
 	}
-	return p.Conditions
+	return p.Conditions, nil
 }
 
 func normalizeProfileFilterIDs(p *domainaidigest.Profile) []int64 {
@@ -847,7 +851,10 @@ func (s *Service) runAI(ctx context.Context, p *domainaidigest.Profile, run *dom
 		return nil, err
 	}
 	run.InputMessageCount = len(msgs)
-	items, included := s.filterMessages(ctx, p, run.ID, msgs)
+	items, included, err := s.filterMessages(ctx, p, run.ID, msgs)
+	if err != nil {
+		return nil, err
+	}
 	run.IncludedCount = len(included)
 	run.ExcludedCount = len(items) - len(included)
 	if err := s.repo.AddRunItems(ctx, items); err != nil {
@@ -979,9 +986,17 @@ func (s *Service) createDeliveryTasks(ctx context.Context, p *domainaidigest.Pro
 	return ids, nil
 }
 
-func (s *Service) filterMessages(ctx context.Context, p *domainaidigest.Profile, runID int64, msgs []*domainmessage.NormalizedMessage) ([]*domainaidigest.RunItem, []*domainmessage.NormalizedMessage) {
+func (s *Service) filterMessages(ctx context.Context, p *domainaidigest.Profile, runID int64, msgs []*domainmessage.NormalizedMessage) ([]*domainaidigest.RunItem, []*domainmessage.NormalizedMessage, error) {
 	limits := normalizedLimits(p.Limits)
-	conditions := s.resolveConditions(ctx, p)
+	conditions, err := s.resolveConditions(ctx, p)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, cfg := range conditions {
+		if err := condition.ValidateConfig(cfg.Type, cfg.Config); err != nil {
+			return nil, nil, fmt.Errorf("过滤条件配置无效: %w", err)
+		}
+	}
 	items := make([]*domainaidigest.RunItem, 0, len(msgs))
 	included := make([]*domainmessage.NormalizedMessage, 0, len(msgs))
 	seen := map[string]struct{}{}
@@ -998,7 +1013,7 @@ func (s *Service) filterMessages(ctx context.Context, p *domainaidigest.Profile,
 		if reason == "" {
 			ok, err := s.matchesConditions(ctx, msg, conditions)
 			if err != nil {
-				reason = "condition_error: " + err.Error()
+				return nil, nil, fmt.Errorf("过滤条件执行失败: %w", err)
 			} else if !ok {
 				reason = "condition_not_match"
 			}
@@ -1028,14 +1043,11 @@ func (s *Service) filterMessages(ctx context.Context, p *domainaidigest.Profile,
 		}
 		items = append(items, item)
 	}
-	return items, included
+	return items, included, nil
 }
 
 func (s *Service) matchesConditions(ctx context.Context, msg *domainmessage.NormalizedMessage, configs []domainflow.ConditionConfig) (bool, error) {
 	for _, cfg := range configs {
-		if cfg.Type == "source" {
-			continue
-		}
 		c, err := condition.Get(cfg.Type)
 		if err != nil {
 			return false, err
@@ -1337,9 +1349,6 @@ func (s *Service) validateProfile(ctx context.Context, p *domainaidigest.Profile
 	p.Dedupe.Enabled = true
 	p.Limits = normalizedLimits(p.Limits)
 	for _, cfg := range p.Conditions {
-		if cfg.Type == "source" {
-			continue
-		}
 		if err := condition.ValidateConfig(cfg.Type, cfg.Config); err != nil {
 			return fmt.Errorf("条件 %s 配置无效: %w", cfg.Type, err)
 		}

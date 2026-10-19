@@ -9,7 +9,9 @@ import (
 
 	"telegram-message-forward/internal/dispatch"
 	domaindelivery "telegram-message-forward/internal/domain/delivery"
+	domainflow "telegram-message-forward/internal/domain/flow"
 	domainmessage "telegram-message-forward/internal/domain/message"
+	"telegram-message-forward/internal/flowengine"
 	"telegram-message-forward/internal/infra/clock"
 )
 
@@ -86,7 +88,12 @@ func TestIngestEditSkipsUnchangedContent(t *testing.T) {
 func TestIngestEditEnqueuesNewRevision(t *testing.T) {
 	messages := &editMessageRepo{result: domainmessage.EditResult{Found: true, Changed: true}}
 	tasks := &editTaskRepo{routes: []domaindelivery.FlowRoute{{SinkID: 3, OriginID: 4, OriginNodeID: 5}}}
-	service := NewService(messages, nil, nil, dispatch.NewQueue(tasks, 3), clock.System{}, testLogger())
+	source, sink := int64(1), int64(3)
+	f := &domainflow.Flow{ID: 4, Name: "edit", Enabled: true, Nodes: []domainflow.Node{
+		{ID: 1, Type: domainflow.NodeTypeSource, RefID: &source},
+		{ID: 5, Type: domainflow.NodeTypeTarget, RefID: &sink},
+	}, Edges: []domainflow.Edge{{FromNodeID: 1, ToNodeID: 5}}}
+	service := NewService(messages, editFlowRepo{flow: f}, flowengine.NewEngine(), dispatch.NewQueue(tasks, 3), clock.System{}, testLogger())
 
 	err := service.Ingest(context.Background(), &domainmessage.NormalizedMessage{
 		SourceID: 1, ExternalMessageID: 2, Text: "edited", EventKind: domainmessage.EventEdit,
@@ -102,6 +109,15 @@ func TestIngestEditEnqueuesNewRevision(t *testing.T) {
 	if task.MessageRevision != 2 || task.TextSuffix != "--edited" {
 		t.Fatalf("补发任务 revision/后缀错误: %+v", task)
 	}
+}
+
+type editFlowRepo struct {
+	domainflow.Repository
+	flow *domainflow.Flow
+}
+
+func (r editFlowRepo) ListEnabledBySource(context.Context, int64) ([]*domainflow.Flow, error) {
+	return []*domainflow.Flow{r.flow}, nil
 }
 
 func testLogger() *slog.Logger {

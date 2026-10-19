@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 	domainsink "telegram-message-forward/internal/domain/sink"
+	"telegram-message-forward/internal/ruleengine/condition"
 )
 
 // parseID 从路径参数解析 int64 id。
@@ -22,6 +23,11 @@ func parseID(c *gin.Context) (int64, bool) {
 
 // respondError 按错误类型返回合适的状态码。
 func respondError(c *gin.Context, err error) {
+	var validation *condition.ValidationError
+	if errors.As(err, &validation) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "fields": []condition.ValidationError{*validation}})
+		return
+	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "资源不存在"})
 		return

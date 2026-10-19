@@ -79,7 +79,7 @@ func (q *Queue) Enqueue(ctx context.Context, msg *domainmessage.NormalizedMessag
 	return nil
 }
 
-// EnqueueEdit 按原消息实际生成过的 Flow 路由创建编辑 revision 投递任务。
+// EnqueueEdit 仅向历史路由与当前匹配结果的交集补发，历史路由不代表当前授权。
 func (q *Queue) EnqueueEdit(ctx context.Context, msg *domainmessage.NormalizedMessage, matches []domainflow.Match, suffix string) error {
 	if msg == nil || msg.ID <= 0 || msg.ContentRevision <= 1 {
 		return nil
@@ -91,16 +91,16 @@ func (q *Queue) EnqueueEdit(ctx context.Context, msg *domainmessage.NormalizedMe
 	created := false
 	enabledSinks := map[int64]bool{}
 	for _, route := range routes {
+		candidate := matchMessageForRoute(matches, route)
+		if candidate == nil {
+			continue
+		}
 		enabled, err := q.sinkEnabled(ctx, route.SinkID, enabledSinks)
 		if err != nil {
 			return err
 		}
 		if !enabled {
 			continue
-		}
-		candidate := matchMessageForRoute(matches, route)
-		if candidate == nil {
-			candidate = msg
 		}
 		snapshot := *candidate
 		snapshot.ID = msg.ID

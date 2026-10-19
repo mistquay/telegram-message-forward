@@ -134,7 +134,8 @@ func TestQueueEnqueueEditReusesOriginalRoutes(t *testing.T) {
 	queue := NewQueue(repo, 3)
 	msg := &domainmessage.NormalizedMessage{ID: 10, Text: "edited", ContentRevision: 2}
 
-	if err := queue.EnqueueEdit(context.Background(), msg, nil, "--edited"); err != nil {
+	matches := []domainflow.Match{{OriginID: 7, OriginNodeID: 42, Message: msg, Targets: []domainflow.Target{{SinkID: 30}}}}
+	if err := queue.EnqueueEdit(context.Background(), msg, matches, "--edited"); err != nil {
 		t.Fatal(err)
 	}
 	if len(repo.tasks) != 1 {
@@ -149,5 +150,33 @@ func TestQueueEnqueueEditReusesOriginalRoutes(t *testing.T) {
 	}
 	if task.MessageSnapshot == nil || task.MessageSnapshot.Text != "edited" {
 		t.Fatalf("编辑消息快照错误: %+v", task.MessageSnapshot)
+	}
+}
+
+func TestQueueEditDoesNotBypassRejectedFilter(t *testing.T) {
+	repo := &notifyTaskRepo{routes: []domaindelivery.FlowRoute{{SinkID: 30, OriginID: 7, OriginNodeID: 42}}}
+	msg := &domainmessage.NormalizedMessage{ID: 10, Text: "spam", ContentRevision: 2}
+	if err := NewQueue(repo, 3).EnqueueEdit(context.Background(), msg, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.tasks) != 0 {
+		t.Fatal("历史路由不能绕过当前过滤结果")
+	}
+}
+
+func TestQueueEditNeverAddsNewRoutesAndUsesProcessedSnapshot(t *testing.T) {
+	repo := &notifyTaskRepo{routes: []domaindelivery.FlowRoute{{SinkID: 30, OriginID: 7, OriginNodeID: 42}}}
+	msg := &domainmessage.NormalizedMessage{ID: 10, Text: "raw", ContentRevision: 2}
+	processed := *msg
+	processed.Text = "processed"
+	matches := []domainflow.Match{
+		{OriginID: 7, OriginNodeID: 42, Message: &processed, Targets: []domainflow.Target{{SinkID: 30}}},
+		{OriginID: 8, OriginNodeID: 43, Message: msg, Targets: []domainflow.Target{{SinkID: 31}}},
+	}
+	if err := NewQueue(repo, 3).EnqueueEdit(context.Background(), msg, matches, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.tasks) != 1 || repo.tasks[0].MessageSnapshot.Text != "processed" {
+		t.Fatalf("应仅向原路由投递当前处理快照: %+v", repo.tasks)
 	}
 }

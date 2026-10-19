@@ -60,6 +60,14 @@ func RegisterWithDescriptor(name string, c Condition, desc Descriptor) {
 
 // Get 返回指定条件实现。
 func Get(name string) (Condition, error) {
+	c, err := getRaw(name)
+	if err != nil {
+		return nil, err
+	}
+	return checkedCondition{name: name, impl: c}, nil
+}
+
+func getRaw(name string) (Condition, error) {
 	mu.RLock()
 	c, ok := registry[name]
 	mu.RUnlock()
@@ -87,7 +95,7 @@ func Descriptors() []Descriptor {
 
 // ValidateConfig validates a condition config using descriptor and custom checks.
 func ValidateConfig(name string, config map[string]any) error {
-	c, err := Get(name)
+	c, err := getRaw(name)
 	if err != nil {
 		return err
 	}
@@ -95,10 +103,33 @@ func ValidateConfig(name string, config map[string]any) error {
 	desc := descriptors[name]
 	mu.RUnlock()
 	if err := formschema.Validate(desc.Fields, config); err != nil {
+		return invalid(name, "config", err.Error())
+	}
+	if err := validateFields(name, desc.Fields, config); err != nil {
 		return err
 	}
 	if validator, ok := c.(ConfigValidator); ok {
-		return validator.ValidateConfig(config)
+		if err := validator.ValidateConfig(config); err != nil {
+			return invalid(name, "config", err.Error())
+		}
 	}
 	return nil
+}
+
+type checkedCondition struct {
+	name string
+	impl Condition
+}
+
+func (c checkedCondition) Evaluate(ctx context.Context, msg *domainmessage.NormalizedMessage, config map[string]any) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if msg == nil {
+		return false, fmt.Errorf("过滤消息不能为空")
+	}
+	if err := ValidateConfig(c.name, config); err != nil {
+		return false, err
+	}
+	return c.impl.Evaluate(ctx, msg, config)
 }
