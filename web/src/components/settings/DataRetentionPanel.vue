@@ -7,6 +7,7 @@ import { errText } from '@/utils/error'
 
 const message = useMessage()
 const form = ref<DataRetentionRequest>({
+  decisions_retention_days: 30,
   messages_retention_days: 90,
   delivery_tasks_retention_days: 90,
   ai_runs_retention_days: 30,
@@ -25,6 +26,7 @@ const canCleanup = computed(() => loaded.value && Object.values(saved.value).som
 
 function assignSettings(settings: DataRetentionSettings): void {
   const value: DataRetentionRequest = {
+    decisions_retention_days: settings.decisions_retention_days ?? 30,
     messages_retention_days: settings.messages_retention_days,
     delivery_tasks_retention_days: settings.delivery_tasks_retention_days,
     ai_runs_retention_days: settings.ai_runs_retention_days ?? 30,
@@ -65,6 +67,7 @@ async function save(): Promise<void> {
 
 function openCleanup(): void {
   cleanupTargets.value = [
+    ...(saved.value.decisions_retention_days > 0 ? ['decisions' as const] : []),
     ...(saved.value.messages_retention_days > 0 ? ['messages' as const] : []),
     ...(saved.value.delivery_tasks_retention_days > 0 ? ['delivery_tasks' as const] : []),
     ...(saved.value.ai_runs_retention_days > 0 ? ['ai_runs' as const] : []),
@@ -81,7 +84,7 @@ async function cleanup(): Promise<void> {
   try {
     const result = await settingsApi.dataRetention.cleanup({ targets: [...cleanupTargets.value] })
     showCleanup.value = false
-    const summary = `消息 ${result.deleted_messages} 条、投递记录 ${result.deleted_delivery_tasks} 条、AI 运行 ${result.deleted_ai_runs} 条`
+    const summary = `消息 ${result.deleted_messages} 条、投递记录 ${result.deleted_delivery_tasks} 条、AI 运行 ${result.deleted_ai_runs} 条、决策 ${result.deleted_decisions ?? 0} 条`
     if (result.limit_reached.length > 0) {
       message.warning(`已清理 ${summary}；部分数据达到单次上限，后续定时任务会继续处理`)
     } else {
@@ -107,9 +110,10 @@ onMounted(() => void load())
     <n-spin :show="loading">
       <n-space vertical size="large">
         <n-text depth="3">
-          按保留天数自动清理历史消息、终态投递任务和 AI 运行记录。0 表示不清理，保存后热生效。
+          按保留天数自动清理历史消息、终态投递任务、AI 运行和过滤决策。0 表示不清理，保存后热生效。
         </n-text>
         <n-form label-placement="left" label-width="160" :show-feedback="false">
+          <n-form-item label="过滤决策保留(天)"><n-space align="center"><n-input-number v-model:value="form.decisions_retention_days" :min="0" class="number-input" /><n-text depth="3">默认 30 天；独立清理执行详情，不影响原消息与任务。原消息删除时仍会级联删除。</n-text></n-space></n-form-item>
           <n-form-item label="消息保留(天)">
             <n-space align="center">
               <n-input-number v-model:value="form.messages_retention_days" :min="0" class="number-input" />
@@ -151,6 +155,7 @@ onMounted(() => void load())
         </n-alert>
         <n-checkbox-group v-model:value="cleanupTargets">
           <n-space vertical>
+            <n-checkbox value="decisions" :disabled="saved.decisions_retention_days === 0">过滤决策（{{ saved.decisions_retention_days }} 天）</n-checkbox>
             <n-checkbox value="messages" :disabled="saved.messages_retention_days === 0">
               消息（{{ saved.messages_retention_days }} 天）
             </n-checkbox>

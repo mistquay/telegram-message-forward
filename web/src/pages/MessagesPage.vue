@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref, shallowRef } from 'vue'
-import { useRouter } from 'vue-router'
+import { onMounted, ref, shallowRef, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { sourcesApi } from '@/api/client'
 import type { Source } from '@/types'
@@ -13,6 +13,7 @@ import MessageList from '@/components/messages/MessageList.vue'
 import MessageDetailDrawer from '@/components/messages/MessageDetailDrawer.vue'
 
 const router = useRouter()
+const route = useRoute()
 const message = useMessage()
 const filters = ref(defaultMessageFilters())
 const sources = shallowRef<Source[]>([])
@@ -44,7 +45,10 @@ function openDelivery(id: number) {
 onMounted(async () => {
   void search()
   try { sources.value = await sourcesApi.list() } catch { /* 来源下拉为空不阻断消息列表。 */ }
+  const id = Number(route.query.message_id)
+  if (id > 0) await openDetail(id)
 })
+watch(() => route.query.message_id, (value) => { const id = Number(value); if (id > 0) void openDetail(id) })
 </script>
 
 <template>

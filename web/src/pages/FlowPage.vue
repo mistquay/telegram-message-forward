@@ -5,6 +5,11 @@ import { useDialog, useMessage } from 'naive-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import ClayIcon from '@/components/ClayIcon.vue'
 import ConfigFormRenderer from '@/components/ConfigFormRenderer.vue'
+import ConditionEditor from '@/components/filters/ConditionEditor.vue'
+import SharedFilterDetails from '@/components/filters/SharedFilterDetails.vue'
+import FlowPreviewPanel from '@/components/flow/FlowPreviewPanel.vue'
+import FlowTopology from '@/components/flow/FlowTopology.vue'
+import { conditionSummary, cloneConditions } from '@/utils/filterConditions'
 import FlowCanvas from '@/components/flow/FlowCanvas.vue'
 import RouteInspector from '@/components/flow/RouteInspector.vue'
 import ResourceShelf from '@/components/flow/ResourceShelf.vue'
@@ -68,8 +73,9 @@ const selectedSinkToAdd = shallowRef<number | null>(null)
 const selectedProcessorToAdd = shallowRef<string>('append_source')
 const flowSaving = shallowRef(false)
 const flowSavedHint = shallowRef('')
+const showExecution = ref(false)
+const inspectedFlow = computed(() => editorActive.value ? flowDraft.value : flows.value.find((f) => f.id === (selection.value?.kind === 'rule' ? selection.value.id : selectedEdge.value?.ruleId)) ?? null)
 
-const conditionLabelByType = computed(() => new Map(ruleMeta.value.conditions.map((d) => [d.type, d.label])))
 const processorLabelByType = computed(() => new Map(ruleMeta.value.processors.map((d) => [d.type, d.label])))
 const sinkTypeLabelByType = computed(() => new Map(sinkDescriptors.value.map((d) => [d.type, d.label])))
 const accountNameById = computed(() => new Map(accounts.value.map((a) => [a.id, a.name])))
@@ -79,9 +85,8 @@ const sinkById = computed(() => new Map(sinks.value.map((s) => [s.id, s])))
 const templateById = computed(() => new Map(templates.value.map((t) => [t.id, t])))
 const flowOptions = computed(() => flows.value.map((f) => ({ label: f.name, value: f.id })))
 const sourceOptions = computed(() => sources.value.map((s) => ({ label: sourceOptionLabel(s), value: s.id })))
-const filterOptions = computed(() => filters.value.map((f) => ({ label: f.name, value: f.id })))
+const filterOptions = computed(() => { const ids = selectedDraftNode.value?.config.filter_ids ?? []; return filters.value.map((f) => ({ label: f.name, value: f.id, disabled: ids.length >= 32 && !ids.includes(f.id) })) })
 const sinkOptions = computed(() => sinks.value.map((s) => ({ label: s.name, value: s.id })))
-const conditionOptions = computed(() => ruleMeta.value.conditions.map((item) => ({ label: item.label, value: item.type })))
 const processorOptions = computed(() => ruleMeta.value.processors.map((p) => ({ label: p.label, value: p.type })))
 const templateOptions = computed(() => [
   { label: '原文投递', value: 0 },
@@ -218,10 +223,6 @@ function sinkRuleCount(sinkId: number): number {
   return rules.value.filter((r) => r.targets.some((t) => t.sink_id === sinkId)).length
 }
 
-function conditionLabel(type: string): string {
-  return conditionLabelByType.value.get(type) ?? type
-}
-
 function processorLabel(type: string): string {
   return processorLabelByType.value.get(type) ?? type
 }
@@ -232,10 +233,6 @@ function defaultsFor(desc?: RuleItemDescriptor): Record<string, unknown> {
     if (field.default !== undefined) out[field.key] = field.default
   }
   return out
-}
-
-function conditionDescriptor(type: string): RuleItemDescriptor | undefined {
-  return ruleMeta.value.conditions.find((item) => item.type === type)
 }
 
 function processorDescriptor(type: string): RuleItemDescriptor | undefined {
@@ -338,9 +335,7 @@ const canvasRules = computed<CanvasNodeInput<RuleNodeData>[]>(() =>
       priority: node.rule.priority,
       orderLabel: ruleOrderLabel(node.rule),
       stopOnMatch: node.rule.stop_on_match,
-      conditionChips: node.rule.filter_ids.length
-        ? node.rule.filter_ids.map((id) => filterName(id))
-        : node.rule.conditions.map((item) => conditionLabel(item.type)),
+      conditionChips: [...node.rule.filter_ids.map((id) => filterName(id)), ...node.rule.conditions.map(conditionSummary)],
       processorChips: node.rule.processors.map((item) => processorLabel(item.type)),
       warnings: node.warnings,
     },
@@ -458,7 +453,7 @@ const draftFilterNodes = computed<CanvasNodeInput<FilterNodeData>[]>(() =>
       position: { x: node.pos_x, y: node.pos_y },
       stateClass: draftStateClass(node.id),
       data: {
-        name: firstFilter ?? (inlineConditions.length ? '内联过滤器' : '过滤器'),
+        name: firstFilter || (inlineConditions.length ? '内联过滤器' : '过滤器'),
         conditionCount: filterIds.length || inlineConditions.length,
         ruleCount: 0,
         linkLabel: draftLinkLabel(node.id),
@@ -577,7 +572,12 @@ function canvasKindOf(type: FlowNodeType) {
 }
 
 function cloneFlow(flow: Flow): Flow {
-  return JSON.parse(JSON.stringify(flow)) as Flow
+  const copy = JSON.parse(JSON.stringify(flow)) as Flow
+  for (const node of copy.nodes) {
+    if (node.config.conditions) node.config.conditions = cloneConditions(node.config.conditions)
+    for (const processor of node.config.processors ?? []) processor.config ??= {}
+  }
+  return copy
 }
 
 function flowBodyOf(draft: Flow | null) {
@@ -773,25 +773,6 @@ function updateSelectedFilterIds(value: number[] | null) {
   if (!node || node.type !== 'filter') return
   node.config.filter_ids = value ?? []
   if (node.config.filter_ids.length) node.config.conditions = []
-}
-
-function addSelectedCondition() {
-  const node = selectedDraftNode.value
-  const desc = ruleMeta.value.conditions[0]
-  if (!node || node.type !== 'filter' || !desc) return
-  node.config.filter_ids = []
-  node.config.conditions = [...(node.config.conditions ?? []), { type: desc.type, config: defaultsFor(desc) }]
-}
-
-function removeSelectedCondition(index: number) {
-  const node = selectedDraftNode.value
-  if (!node || node.type !== 'filter') return
-  node.config.conditions = (node.config.conditions ?? []).filter((_, itemIndex) => itemIndex !== index)
-}
-
-function updateSelectedConditionType(item: ConditionConfig, type: string) {
-  item.type = type
-  item.config = defaultsFor(conditionDescriptor(type))
 }
 
 function addSelectedProcessor() {
@@ -1078,10 +1059,11 @@ onBeforeUnmount(() => {
   <div class="flow-page">
     <PageHeader
       title="转发编排"
-      desc="全局查看转发路径；选中 Flow 后聚焦编辑，开关类操作会自动保存"
+      desc="资源关系概览不表示执行顺序；选中 Flow 查看真实分支与只读预演，开关操作自动保存"
       icon="flow"
     >
       <template #actions>
+        <NButton secondary :disabled="!inspectedFlow" @click="showExecution = true">真实结构 / 预演</NButton>
         <NButton type="primary" @click="openCreateRule">
           <template #icon><ClayIcon name="plus" :size="16" /></template>
           {{ selection && selection.kind !== 'rule' ? '沿选中项建 Flow' : '新建 Flow' }}
@@ -1241,7 +1223,6 @@ onBeforeUnmount(() => {
         :filters="filters"
         :source-type-label="sourceTypeLabel"
         :sink-type-label="sinkTypeLabel"
-        :condition-label="conditionLabel"
         :processor-label="processorLabel"
         @create-rule="openCreateRule"
         @edit-rule="openEditRule"
@@ -1344,29 +1325,11 @@ onBeforeUnmount(() => {
               />
             </NFormItem>
             <NAlert v-if="selectedDraftNodeUsesSharedFilters" type="info" :show-icon="false" class="editor-alert">
-              当前节点引用共享过滤器；清空后可编辑只属于这个节点的内联条件。
+              当前节点引用共享过滤器（最多 32 个，全部通过才继续）；清空后可编辑内联条件。详情和测试可从过滤器页面进入。
             </NAlert>
+            <SharedFilterDetails v-if="selectedDraftNodeUsesSharedFilters" :ids="selectedDraftNode.config.filter_ids ?? []" :filters="filters" :descriptors="ruleMeta.conditions" />
             <template v-else>
-              <div v-for="(condition, index) in selectedDraftNode.config.conditions ?? []" :key="index" class="node-config-block">
-                <NSpace align="center" justify="space-between">
-                  <NSelect
-                    :value="condition.type"
-                    class="type-select"
-                    :options="conditionOptions"
-                    @update:value="(value: string) => updateSelectedConditionType(condition, value)"
-                  />
-                  <NButton size="small" type="error" secondary @click="removeSelectedCondition(index)">移除</NButton>
-                </NSpace>
-                <ConfigFormRenderer
-                  v-if="conditionDescriptor(condition.type)"
-                  v-model="condition.config"
-                  :fields="conditionDescriptor(condition.type)?.fields ?? []"
-                />
-                <NText v-if="conditionDescriptor(condition.type)?.description" depth="3">
-                  {{ conditionDescriptor(condition.type)?.description }}
-                </NText>
-              </div>
-              <NButton size="small" dashed block @click="addSelectedCondition">添加内联条件</NButton>
+              <ConditionEditor :model-value="selectedDraftNode.config.conditions ?? []" :descriptors="ruleMeta.conditions" @update:model-value="(v: ConditionConfig[]) => { if (selectedDraftNode) selectedDraftNode.config.conditions = v }" />
             </template>
           </template>
           <template v-else-if="selectedDraftNode.type === 'processor'">
@@ -1409,6 +1372,13 @@ onBeforeUnmount(() => {
         </section>
       </aside>
     </div>
+    <NModal v-model:show="showExecution" preset="card" title="真实 Flow 结构与只读预演" :style="{ width: 'min(1100px, calc(100vw - 24px))' }">
+      <NTabs v-if="inspectedFlow" type="line">
+        <NTabPane name="graph" tab="真实执行结构"><FlowTopology :flow="inspectedFlow" :filters="filters" :sources="sources" :sinks="sinks" /></NTabPane>
+        <NTabPane name="preview" tab="全链路模拟"><FlowPreviewPanel :key="inspectedFlow.id" :flow="inspectedFlow" :sources="sources" /></NTabPane>
+      </NTabs>
+      <NEmpty v-else description="请先选中一个 Flow" />
+    </NModal>
   </div>
 </template>
 

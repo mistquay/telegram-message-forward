@@ -376,6 +376,7 @@ onMounted(() => {
         <n-button secondary type="warning" @click="retryDeadBatch">批量重试 dead</n-button>
       </template>
     </PageHeader>
+    <NAlert type="info" :show-icon="false">重试沿用原任务的消息快照，不会按当前过滤配置重新判断；如需检查现行规则，请从消息中心进行只读重评。已入队不代表外部发送成功。</NAlert>
     <n-data-table
       remote
       class="deliveries-table"

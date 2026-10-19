@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { AIDigestRunItem } from '@/types'
 import { formatDateTime } from '@/utils/datetime'
+import DecisionPanel from '@/components/filters/DecisionPanel.vue'
 
 const props = defineProps<{
   items: AIDigestRunItem[]
@@ -14,7 +15,7 @@ const excluded = computed(() => props.items.filter((item) => !item.included))
 function reasonLabel(reason?: string): string {
   const labels: Record<string, string> = {
     empty_text: '无文本内容',
-    condition_not_match: '未命中过滤条件',
+    condition_not_match: '未通过过滤条件',
     duplicate: '重复消息',
     limit_max_messages: '超过消息数量上限',
     excluded: '已排除',
@@ -46,6 +47,7 @@ function sourceMeta(item: AIDigestRunItem): string {
           <div class="message-meta">{{ sourceMeta(item) }}</div>
           <div class="message-text">{{ item.message?.text || '[无文本]' }}</div>
           <div v-if="item.message?.media?.length" class="message-media">附件 {{ item.message.media.length }} 个</div>
+          <details v-if="item.filter_trace?.type"><summary>过滤判断详情</summary><DecisionPanel :node="item.filter_trace" /></details>
         </div>
         <NEmpty v-if="!included.length" size="small" description="无纳入消息" />
       </NScrollbar>
@@ -62,6 +64,7 @@ function sourceMeta(item: AIDigestRunItem): string {
           <NTag size="tiny" type="warning" :bordered="false">{{ reasonLabel(item.reason) }}</NTag>
           <div class="message-text">{{ item.message?.text || '[无文本]' }}</div>
           <div v-if="item.message?.media?.length" class="message-media">附件 {{ item.message.media.length }} 个</div>
+          <details v-if="item.filter_trace?.type"><summary>过滤判断详情</summary><DecisionPanel :node="item.filter_trace" /></details>
         </div>
         <NEmpty v-if="!excluded.length" size="small" description="无排除消息" />
       </NScrollbar>

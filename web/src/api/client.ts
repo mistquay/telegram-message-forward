@@ -56,6 +56,13 @@ import type {
   ChatExportJob,
   ChatExportCreateRequest,
   ChatExportCreated,
+  FilterReference,
+  FilterVersion,
+  DecisionRecord,
+  FilterPreviewRequest,
+  FilterPreview,
+  FlowPreview,
+  PreviewMessage,
 } from '@/types'
 
 const TOKEN_KEY = 'tmf_api_token'
@@ -325,7 +332,7 @@ export function flowToLinearFlow(flow: Flow): LinearFlow {
       .map((node) => node.ref_id ?? 0)
       .filter((id) => id > 0),
     filter_ids: filterIDs,
-    conditions: filterIDs.length ? [] : filterNodes.flatMap((node) => node.config.conditions ?? []),
+    conditions: filterNodes.flatMap((node) => node.config.conditions ?? []),
     processors: byType('processor').flatMap((node) => node.config.processors ?? []),
     targets: byType('target')
       .map((node) => ({ sink_id: node.ref_id ?? 0, template_id: node.template_id }))
@@ -337,6 +344,8 @@ export function flowToLinearFlow(flow: Flow): LinearFlow {
 
 // --- Flows ---
 export const flowsApi = {
+  preview: (body: { flow: FlowRequest; flow_id?: number; message_id?: number; message?: PreviewMessage; full_chain?: boolean; edit?: boolean }) =>
+    http.post<ApiItem<FlowPreview>>('/flows/preview', body).then((r) => r.data.data),
   list: () => http.get<ApiList<Flow>>('/flows').then((r) => r.data.data),
   meta: () => http.get<ApiItem<RuleMeta>>('/flows/meta').then((r) => r.data.data),
   get: (id: number) => http.get<ApiItem<Flow>>(`/flows/${id}`).then((r) => r.data.data),
@@ -347,6 +356,12 @@ export const flowsApi = {
 
 // --- Filters（可复用过滤器） ---
 export const filtersApi = {
+  validate: (conditions: import('@/types').ConditionConfig[]) => http.post('/filters/validate', { conditions }),
+  references: (id: number) => http.get<ApiList<FilterReference>>(`/filters/${id}/references`).then((r) => r.data.data),
+  versions: (id: number, offset = 0) => http.get<ApiPage<FilterVersion>>(`/filters/${id}/versions`, { params: { limit: 30, offset } }).then((r) => r.data),
+  version: (id: number, revision: number) => http.get<ApiItem<FilterVersion>>(`/filters/${id}/versions/${revision}`).then((r) => r.data.data),
+  decisions: (id: number, status = '', offset = 0) => http.get<ApiPage<DecisionRecord>>(`/filters/${id}/decisions`, { params: { status, limit: 30, offset } }).then((r) => r.data),
+  preview: (body: FilterPreviewRequest) => http.post<ApiItem<FilterPreview>>('/filters/preview', body).then((r) => r.data.data),
   list: () => http.get<ApiList<Filter>>('/filters').then((r) => r.data.data),
   get: (id: number) => http.get<ApiItem<Filter>>(`/filters/${id}`).then((r) => r.data.data),
   create: (body: FilterRequest) => http.post<ApiItem<Filter>>('/filters', body).then((r) => r.data.data),

@@ -184,9 +184,14 @@ export interface TemplatePreview {
   text: string
 }
 
+import type { FilterStats, DecisionRecord, NodeDecision } from './filter'
+export * from './filter'
+
 export interface ConditionConfig {
   type: string
   config: Record<string, unknown>
+  negate?: boolean
+  children?: ConditionConfig[]
 }
 
 export interface ProcessorConfig {
@@ -265,6 +270,8 @@ export interface Flow {
 export type FlowRequest = Pick<Flow, 'name' | 'enabled' | 'priority' | 'stop_on_match' | 'nodes' | 'edges'>
 
 export interface Filter {
+  revision?: number
+  stats?: FilterStats
   id: number
   name: string
   description: string
@@ -273,7 +280,7 @@ export interface Filter {
   updated_at: string
 }
 
-export type FilterRequest = Pick<Filter, 'name' | 'description' | 'conditions'>
+export type FilterRequest = Pick<Filter, 'name' | 'description' | 'conditions' | 'revision'>
 
 export interface Delivery {
   id: number
@@ -377,6 +384,7 @@ export interface MessageDeliveryCounts {
 }
 
 export interface MessageItem {
+  content_revision?: number
   id: number
   source_id: number
   source_name: string
@@ -416,6 +424,7 @@ export interface MessageDeliveryRef {
 }
 
 export interface MessageDetail {
+  decisions?: DecisionRecord[]
   message: MessageItem
   deliveries: MessageDeliveryRef[]
 }
@@ -544,6 +553,7 @@ export interface MediaCleanupResult {
 }
 
 export interface DataRetentionSettings {
+  decisions_retention_days: number
   messages_retention_days: number
   delivery_tasks_retention_days: number
   ai_runs_retention_days: number
@@ -552,18 +562,20 @@ export interface DataRetentionSettings {
 }
 
 export interface DataRetentionRequest {
+  decisions_retention_days: number
   messages_retention_days: number
   delivery_tasks_retention_days: number
   ai_runs_retention_days: number
 }
 
-export type DataCleanupTarget = 'messages' | 'delivery_tasks' | 'ai_runs'
+export type DataCleanupTarget = 'messages' | 'delivery_tasks' | 'ai_runs' | 'decisions'
 
 export interface DataCleanupRequest {
   targets: DataCleanupTarget[]
 }
 
 export interface DataCleanupResult {
+  deleted_decisions: number
   deleted_messages: number
   deleted_delivery_tasks: number
   deleted_ai_runs: number
@@ -783,6 +795,7 @@ export interface AIDigestMessageRef {
 }
 
 export interface AIDigestRunItem {
+  filter_trace?: NodeDecision
   message_id: number
   source_id: number
   included: boolean

@@ -8,7 +8,8 @@
     "build": "vue-tsc -b && vite build",
     "build:embed": "vue-tsc -b && vite build --outDir ../internal/webui/dist --emptyOutDir",
     "preview": "vite preview",
-    "type-check": "vue-tsc --noEmit"
+    "type-check": "vue-tsc --noEmit",
+    "test:filters": "node --experimental-strip-types --test src/utils/filterConditions.test.ts"
   },
   "dependencies": {
     "@types/qrcode": "^1.5.6",

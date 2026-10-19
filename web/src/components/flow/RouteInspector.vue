@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import type { FlowBoardEdgeRef, FlowBoardSelection } from '@/composables/useFlowBoard'
 import type { FlowRuleGraphNode } from '@/composables/useForwardingGraph'
 import type { Filter, LinearFlow, Sink, Source } from '@/types'
+import { conditionSummary } from '@/utils/filterConditions'
 
 interface MatchingRule {
   order: number
@@ -19,7 +20,6 @@ const props = defineProps<{
   filters: Filter[]
   sourceTypeLabel: (source: Source) => string
   sinkTypeLabel: (sink: Sink) => string
-  conditionLabel: (type: string) => string
   processorLabel: (type: string) => string
 }>()
 
@@ -129,8 +129,7 @@ function filterName(id: number): string {
 }
 
 function conditionNames(rule: LinearFlow): string[] {
-  if (rule.filter_ids.length) return rule.filter_ids.map((id) => filterName(id))
-  return rule.conditions.map((condition) => props.conditionLabel(condition.type))
+  return [...rule.filter_ids.map((id) => filterName(id)), ...rule.conditions.map(conditionSummary)]
 }
 
 function processorNames(rule: LinearFlow): string[] {
@@ -220,7 +219,7 @@ function matchingRulesForSource(sourceId: number, activeRuleId?: number): Matchi
       </section>
 
       <section v-if="selectedRuleNode" class="section">
-        <div class="section-title">处理</div>
+        <div class="section-title">引用能力摘要（不是执行顺序）</div>
         <div class="chip-list">
           <span v-for="item in conditionNames(selectedRuleNode.rule)" :key="`c-${item}`" class="chip condition">{{ item }}</span>
           <span v-for="item in processorNames(selectedRuleNode.rule)" :key="`p-${item}`" class="chip processor">{{ item }}</span>

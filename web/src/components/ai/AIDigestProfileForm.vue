@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
-import ConfigFormRenderer from '@/components/ConfigFormRenderer.vue'
+import ConditionEditor from '@/components/filters/ConditionEditor.vue'
+import FilterTestPanel from '@/components/filters/FilterTestPanel.vue'
+import SharedFilterDetails from '@/components/filters/SharedFilterDetails.vue'
+import { cloneConditions } from '@/utils/filterConditions'
 import type {
   AIDigestProfile,
   AIDigestProfileRequest,
@@ -83,7 +86,6 @@ const selectedProvider = computed(() =>
     ?? props.providers[0],
 )
 const presetOptions = computed(() => props.presets.map((item) => ({ label: item.name, value: item.id })))
-const conditionOptions = computed(() => props.conditionDescriptors.map((item) => ({ label: item.label, value: item.type })))
 const outputFormatOptions = [
   { label: 'Markdown', value: 'markdown' },
   { label: 'Text', value: 'text' },
@@ -142,7 +144,7 @@ const selectedFilters = computed(() => {
   return ids.map((id) => props.filters.find((f) => f.id === id)).filter(Boolean)
 })
 const filterOptions = computed(() =>
-  props.filters.map((f) => ({ label: f.description ? `${f.name} — ${f.description}` : f.name, value: f.id })),
+  props.filters.map((f) => ({ label: f.description ? `${f.name} — ${f.description}` : f.name, value: f.id, disabled: (form.filter_ids?.length ?? 0) >= 32 && !form.filter_ids?.includes(f.id) })),
 )
 const conditionMode = computed({
   get: (): 'shared' | 'inline' => (usingFilter.value ? 'shared' : 'inline'),
@@ -210,7 +212,7 @@ function reset(): void {
     source_ids: [...props.profile.source_ids],
     filter_id: filterIds[0] ?? 0,
     filter_ids: filterIds,
-    conditions: props.profile.conditions.map((item) => ({ type: item.type, config: { ...(item.config ?? {}) } })),
+    conditions: cloneConditions(props.profile.conditions),
     schedule: { ...props.profile.schedule },
     window: { ...props.profile.window },
     dedupe: { ...props.profile.dedupe },
@@ -242,33 +244,6 @@ watch(
 
 function defaultProviderID(): string {
   return props.providers.find((item) => item.is_default)?.id ?? props.providers[0]?.id ?? ''
-}
-
-function conditionDescriptor(type: string): RuleItemDescriptor | undefined {
-  return props.conditionDescriptors.find((item) => item.type === type)
-}
-
-function defaultsFor(desc?: RuleItemDescriptor): Record<string, unknown> {
-  const out: Record<string, unknown> = {}
-  for (const field of desc?.fields ?? []) {
-    if (field.default !== undefined) out[field.key] = field.default
-  }
-  return out
-}
-
-function addCondition(): void {
-  const desc = props.conditionDescriptors.find((item) => item.type !== 'source') ?? props.conditionDescriptors[0]
-  if (!desc) return
-  form.conditions.push({ type: desc.type, config: defaultsFor(desc) })
-}
-
-function updateConditionType(item: ConditionConfig, type: string): void {
-  item.type = type
-  item.config = defaultsFor(conditionDescriptor(type))
-}
-
-function removeCondition(index: number): void {
-  form.conditions.splice(index, 1)
 }
 
 function applyPreset(id: string): void {
@@ -323,7 +298,7 @@ function payload(): AIDigestProfileRequest {
     source_ids: [...form.source_ids],
     filter_id: filterIds[0] ?? 0,
     filter_ids: filterIds,
-    conditions: usingFilter.value ? [] : form.conditions.map((item) => ({ type: item.type, config: { ...(item.config ?? {}) } })),
+    conditions: usingFilter.value ? [] : cloneConditions(form.conditions),
     schedule: { ...form.schedule },
     window: { ...form.window },
     dedupe: { ...form.dedupe },
@@ -437,38 +412,14 @@ function defaultOutputTemplate(): string {
                 />
               </NFormItem>
               <NAlert type="info" :show-icon="false" class="filter-note">
-                已选 {{ selectedFilters.length }} 个共享过滤器，条件按 AND 合并。修改过滤器会联动所有引用处。
+                已选 {{ selectedFilters.length }} 个共享过滤器（最多 32 个），条件按 AND 合并。修改过滤器会联动所有引用处。
               </NAlert>
-              <div class="filter-cond-list">
-                <template v-for="f in selectedFilters" :key="f!.id">
-                  <NTag v-for="(c, i) in f!.conditions" :key="`${f!.id}-${i}`" size="small" :bordered="false" type="info">
-                    {{ f!.name }} · {{ conditionDescriptor(c.type)?.label ?? c.type }}
-                  </NTag>
-                </template>
-              </div>
+              <SharedFilterDetails :ids="form.filter_ids ?? []" :filters="filters" :descriptors="conditionDescriptors" />
             </template>
 
             <template v-else>
-              <div class="cond-head">
-                <span class="cond-head-label">自定义条件</span>
-                <NButton size="tiny" dashed @click="addCondition">添加过滤条件</NButton>
-              </div>
-              <div v-for="(condition, index) in form.conditions" :key="index" class="condition-block">
-                <NSpace align="center" justify="space-between">
-                  <NSelect
-                    :value="condition.type"
-                    class="type-select"
-                    :options="conditionOptions"
-                    @update:value="(value: string) => updateConditionType(condition, value)"
-                  />
-                  <NButton size="small" type="error" secondary @click="removeCondition(index)">移除</NButton>
-                </NSpace>
-                <ConfigFormRenderer
-                  v-if="conditionDescriptor(condition.type)"
-                  v-model="condition.config"
-                  :fields="conditionDescriptor(condition.type)?.fields ?? []"
-                />
-              </div>
+              <ConditionEditor v-model="form.conditions" :descriptors="conditionDescriptors" />
+              <details class="filter-only-preview"><summary>仅测试过滤条件（不调用 AI、不投递）</summary><FilterTestPanel :conditions="form.conditions" /></details>
               <div v-if="!form.conditions.length" class="field-hint">未添加条件时，来源消息全部进入 AI（仅自动去空、去重）。</div>
             </template>
 
@@ -933,12 +884,6 @@ function defaultOutputTemplate(): string {
 
 .filter-note {
   margin-bottom: 10px;
-}
-
-.filter-cond-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
 }
 
 .cond-head {

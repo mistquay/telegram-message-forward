@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { MessageDetail } from '@/types'
 import MessageDeliverySummary from './MessageDeliverySummary.vue'
+import DecisionPanel from '@/components/filters/DecisionPanel.vue'
+import FlowMessageReplay from '@/components/flow/FlowMessageReplay.vue'
 
 defineProps<{ show: boolean; detail: MessageDetail | null; loading: boolean }>()
 const emit = defineEmits<{ 'update:show': [value: boolean]; delivery: [id: number] }>()
@@ -20,7 +22,7 @@ function mediaName(item: Record<string, unknown>, index: number): string {
 </script>
 
 <template>
-  <NDrawer :show="show" :width="640" placement="right" @update:show="emit('update:show', $event)">
+  <NDrawer :show="show" :width="'min(800px, 100vw)'" placement="right" @update:show="emit('update:show', $event)">
     <NDrawerContent title="消息详情" closable :native-scrollbar="false">
       <NSpin :show="loading">
         <NEmpty v-if="!detail && !loading" description="暂无消息详情" />
@@ -42,6 +44,7 @@ function mediaName(item: Record<string, unknown>, index: number): string {
 
           <section>
             <h3>消息内容</h3>
+            <NText depth="3">当前保存的内容 revision {{ detail.message.content_revision ?? 1 }}；历史决策保留当时判断，不代表下方当前正文。</NText>
             <div class="message-body">{{ detail.message.text || `【${detail.message.message_type}消息】` }}</div>
             <a v-if="detail.message.original_url" :href="detail.message.original_url" target="_blank" rel="noopener noreferrer">打开原消息</a>
           </section>
@@ -54,6 +57,16 @@ function mediaName(item: Record<string, unknown>, index: number): string {
                 <span>{{ item.mime_type || item.download_status || '已记录' }}</span>
               </div>
             </div>
+          </section>
+
+          <section>
+            <h3>处理决策</h3>
+            <NAlert v-if="!detail.decisions?.length" type="info" :show-icon="false">未记录历史决策；不能根据当前配置推断当时的过滤结果。</NAlert>
+            <details v-for="record in detail.decisions ?? []" :key="record.id" class="decision-record" open>
+              <summary>revision {{ record.message_revision }} · {{ record.trigger === 'edit' ? '编辑补发判断' : '新消息判断' }} · {{ formatTime(record.created_at) }}</summary>
+              <DecisionPanel :evaluation="record.evaluation" />
+            </details>
+            <FlowMessageReplay :message-id="detail.message.id" :source-id="detail.message.source_id" />
           </section>
 
           <section>
@@ -79,6 +92,8 @@ function mediaName(item: Record<string, unknown>, index: number): string {
 
 <style scoped>
 .detail { display: grid; gap: 22px; }
+.decision-record { margin: 12px 0; padding: 12px; border: 1px solid var(--clay-border); border-radius: 8px; }
+.decision-record summary { cursor: pointer; margin-bottom: 12px; font-weight: 600; }
 .detail-head, .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .detail-head strong { font-size: 18px; }
 .detail-head p { margin: 4px 0 0; color: var(--clay-text-2); }

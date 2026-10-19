@@ -28,6 +28,7 @@ export function useMessages(filters: Ref<MessageFilters>) {
 
   const latestID = computed(() => items.value[0]?.id ?? 0)
   let timer: number | undefined
+  let detailGeneration = 0
 
   function queryParams(beforeID = 0): Record<string, unknown> {
     const value = filters.value
@@ -69,12 +70,14 @@ export function useMessages(filters: Ref<MessageFilters>) {
   }
 
   async function openDetail(id: number) {
+    const generation = ++detailGeneration
     detailLoading.value = true
     detail.value = null
     try {
-      detail.value = await messagesApi.get(id)
+      const response = await messagesApi.get(id)
+      if (generation === detailGeneration) detail.value = response
     } finally {
-      detailLoading.value = false
+      if (generation === detailGeneration) detailLoading.value = false
     }
   }
 

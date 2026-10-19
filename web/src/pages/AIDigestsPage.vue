@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import { useDialog, useMessage } from 'naive-ui'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { aiApi, filtersApi, flowsApi, sinksApi, sourcesApi } from '@/api/client'
 import type {
   AIDigestProfile,
@@ -29,6 +29,7 @@ import AIDigestTemplatesTable from '@/components/ai/AIDigestTemplatesTable.vue'
 const message = useMessage()
 const dialog = useDialog()
 const router = useRouter()
+const route = useRoute()
 
 const activeTab = ref<'profiles' | 'templates' | 'providers'>('profiles')
 
@@ -270,7 +271,7 @@ async function openClonedProfile(profile: AIDigestProfile): Promise<void> {
 }
 
 onMounted(() => {
-  void loadAll()
+  void loadAll().then(() => { const id = Number(route.query.profile_id); const p = profiles.value.find((item) => item.id === id); if (p) editProfile(p) })
   scheduleTimer = window.setInterval(() => void refreshScheduleStatus(), 60_000)
 })
 
