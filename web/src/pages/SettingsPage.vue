@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/auth'
 import type { ApiToken } from '@/types'
 import { errText } from '@/utils/error'
 import PageHeader from '@/components/PageHeader.vue'
+import AccountSecurityPanel from '@/components/settings/AccountSecurityPanel.vue'
 import BackupRestorePanel from '@/components/settings/BackupRestorePanel.vue'
 import DataRetentionPanel from '@/components/settings/DataRetentionPanel.vue'
 import MediaStoragePanel from '@/components/settings/MediaStoragePanel.vue'
@@ -84,6 +85,7 @@ onMounted(() => void loadTokens())
   <n-space vertical size="large">
     <PageHeader title="设置" desc="管理 API 鉴权与访问凭证" icon="settings" />
 
+    <AccountSecurityPanel />
     <DataRetentionPanel />
     <MediaStoragePanel />
 

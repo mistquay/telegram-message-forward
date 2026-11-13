@@ -102,8 +102,7 @@ app.use(naive)
 
 setUnauthorizedHandler(() => {
   const auth = useAuthStore(pinia)
-  auth.saveToken('')
-  auth.authenticated = false
+  auth.clearSession()
   if (router.currentRoute.value.name !== 'login') {
     void router.push({ name: 'login' })
   }

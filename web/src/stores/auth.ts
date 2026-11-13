@@ -9,6 +9,8 @@ export const useAuthStore = defineStore('auth', {
     token: getToken(),
     mode: 'unknown' as AuthMode,
     authenticated: false,
+    username: '',
+    credentialType: '',
     canBootstrap: false,
     initialized: false,
   }),
@@ -25,11 +27,19 @@ export const useAuthStore = defineStore('auth', {
       this.token = token
       setToken(token)
     },
+    clearSession() {
+      this.saveToken('')
+      this.authenticated = false
+      this.username = ''
+      this.credentialType = ''
+    },
     // 从后端刷新当前身份状态（公开端点，登录前也可调用）。
     async fetchMe() {
       const me = await authApi.me()
       this.mode = me.auth_enabled ? 'enabled' : 'disabled'
       this.authenticated = me.authenticated
+      this.username = me.username ?? ''
+      this.credentialType = me.credential_type ?? ''
       this.canBootstrap = me.can_bootstrap
       this.initialized = true
       return me
@@ -53,15 +63,18 @@ export const useAuthStore = defineStore('auth', {
       await this.fetchMe()
       return created
     },
+    async changePassword(currentPassword: string, newPassword: string) {
+      await authApi.changePassword(currentPassword, newPassword)
+      this.clearSession()
+    },
     // 退出登录：清理本地凭证并回到未登录态。
     async logout() {
       try {
         await authApi.logout()
       } catch {
-        // 服务端无会话状态，忽略退出请求错误。
+        // 后端不可达时仍清理本地凭证。
       }
-      this.saveToken('')
-      this.authenticated = false
+      this.clearSession()
     },
   },
 })

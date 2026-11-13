@@ -812,6 +812,12 @@ type LoginRequest struct {
 	Password string `json:"password" binding:"required"`
 }
 
+// ChangePasswordRequest 只接收密码，不接受目标用户，避免跨账号改密。
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewPassword     string `json:"new_password" binding:"required"`
+}
+
 // LoginResultDTO 是登录结果。
 type LoginResultDTO struct {
 	Authenticated bool      `json:"authenticated"`

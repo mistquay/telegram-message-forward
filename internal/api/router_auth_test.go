@@ -101,9 +101,13 @@ func (r *fakeAdminRepo) MarkUserLogin(_ context.Context, userID int64, at time.T
 	return nil
 }
 
-func (r *fakeAdminRepo) CreateSession(_ context.Context, s *domainadmin.Session) error {
+func (r *fakeAdminRepo) CreateSession(_ context.Context, s *domainadmin.Session, passwordHash string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	u := r.users[s.UserID]
+	if u == nil || !u.Active || u.PasswordHash != passwordHash {
+		return domainadmin.ErrCredentialChanged
+	}
 	r.nextSess++
 	cp := *s
 	cp.ID = r.nextSess
@@ -112,6 +116,24 @@ func (r *fakeAdminRepo) CreateSession(_ context.Context, s *domainadmin.Session)
 	s.ID = cp.ID
 	s.CreatedAt = cp.CreatedAt
 	return nil
+}
+
+func (r *fakeAdminRepo) ChangePassword(_ context.Context, userID int64, oldHash, newHash string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u := r.users[userID]
+	if u == nil || !u.Active || u.PasswordHash != oldHash {
+		return false, nil
+	}
+	u.PasswordHash = newHash
+	now := time.Now()
+	u.UpdatedAt = now
+	for _, sess := range r.sessions {
+		if sess.UserID == userID && sess.RevokedAt == nil {
+			sess.RevokedAt = &now
+		}
+	}
+	return true, nil
 }
 
 func (r *fakeAdminRepo) GetActiveSessionByHash(_ context.Context, hash string, now time.Time) (*domainadmin.Session, *domainadmin.User, error) {

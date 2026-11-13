@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	domainadmin "telegram-message-forward/internal/domain/admin"
 	"telegram-message-forward/internal/storage/model"
@@ -75,19 +76,52 @@ func (r *AdminRepository) MarkUserLogin(ctx context.Context, userID int64, at ti
 	return r.db.WithContext(ctx).Model(&model.AdminUser{}).Where("id = ?", userID).Update("last_login_at", at).Error
 }
 
-// CreateSession 创建会话。
-func (r *AdminRepository) CreateSession(ctx context.Context, s *domainadmin.Session) error {
+// CreateSession 锁定用户后核对密码版本，避免旧密码登录与改密并发时遗留有效会话。
+func (r *AdminRepository) CreateSession(ctx context.Context, s *domainadmin.Session, passwordHash string) error {
 	m := &model.AdminSession{
 		UserID:    s.UserID,
 		TokenHash: s.TokenHash,
 		ExpiresAt: s.ExpiresAt,
 	}
-	if err := r.db.WithContext(ctx).Create(m).Error; err != nil {
+	if err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var user model.AdminUser
+		err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Select("id").
+			Where("id = ? AND active = ? AND password_hash = ?", s.UserID, true, passwordHash).First(&user).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return domainadmin.ErrCredentialChanged
+		}
+		if err != nil {
+			return err
+		}
+		return tx.Create(m).Error
+	}); err != nil {
 		return err
 	}
 	s.ID = m.ID
 	s.CreatedAt = m.CreatedAt
 	return nil
+}
+
+// ChangePassword 使用旧哈希做并发校验；更新密码和吊销会话必须一同提交或回滚。
+func (r *AdminRepository) ChangePassword(ctx context.Context, userID int64, oldHash, newHash string) (bool, error) {
+	changed := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		result := tx.Model(&model.AdminUser{}).
+			Where("id = ? AND active = ? AND password_hash = ?", userID, true, oldHash).
+			Updates(map[string]any{"password_hash": newHash, "updated_at": now})
+		if result.Error != nil || result.RowsAffected == 0 {
+			return result.Error
+		}
+		if err := tx.Model(&model.AdminSession{}).
+			Where("user_id = ? AND revoked_at IS NULL", userID).
+			Update("revoked_at", now).Error; err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	return changed && err == nil, err
 }
 
 // GetActiveSessionByHash 查询未吊销且未过期的会话及用户。

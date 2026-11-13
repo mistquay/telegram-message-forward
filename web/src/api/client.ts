@@ -125,6 +125,8 @@ export const authApi = {
       .post<ApiItem<{ authenticated: boolean; token: string }>>('/auth/login', { username, password })
       .then((r) => r.data.data),
   me: () => http.get<ApiItem<Me>>('/auth/me').then((r) => r.data.data),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    http.post<void>('/auth/password', { current_password: currentPassword, new_password: newPassword }),
   logout: () => http.post('/auth/logout'),
 }
 

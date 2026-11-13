@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	apptoken "telegram-message-forward/internal/app/apitoken"
 	domainadmin "telegram-message-forward/internal/domain/admin"
@@ -69,6 +70,13 @@ func (ErrBootstrapClosed) Error() string { return "已存在管理凭证，初�
 // ErrInvalidCredential 表示用户名或密码错误。
 var ErrInvalidCredential = errors.New("用户名或密码错误")
 
+var (
+	ErrSessionRequired = errors.New("请使用管理员账号重新登录后修改密码")
+	ErrCurrentPassword = errors.New("当前密码不正确")
+	ErrNewPassword     = errors.New("新密码至少需要 16 个字符，且不能超过 72 字节")
+	ErrSamePassword    = errors.New("新密码不能与当前密码相同")
+)
+
 // LoginResult 是登录/初始化成功后的浏览器会话结果。
 type LoginResult struct {
 	Authenticated bool
@@ -128,13 +136,48 @@ func (s *Service) createSession(ctx context.Context, user *domainadmin.User) (*L
 		TokenHash: security.HashToken(token),
 		ExpiresAt: expires,
 	}
-	if err := s.admins.CreateSession(ctx, sess); err != nil {
+	if err := s.admins.CreateSession(ctx, sess, user.PasswordHash); err != nil {
 		return nil, err
 	}
 	if err := s.admins.MarkUserLogin(ctx, user.ID, now); err != nil {
 		return nil, err
 	}
 	return &LoginResult{Authenticated: true, Token: token, Username: user.Username, ExpiresAt: expires}, nil
+}
+
+// ChangePassword 仅允许有效浏览器会话修改自身密码，API token 和免鉴权模式不能代替登录。
+func (s *Service) ChangePassword(ctx context.Context, token, currentPassword, newPassword string) error {
+	if strings.TrimSpace(token) == "" {
+		return ErrSessionRequired
+	}
+	sess, user, err := s.admins.GetActiveSessionByHash(ctx, security.HashToken(token), time.Now())
+	if err != nil {
+		return err
+	}
+	if sess == nil || user == nil {
+		return ErrSessionRequired
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+		return ErrCurrentPassword
+	}
+	if utf8.RuneCountInString(newPassword) < 16 || len(newPassword) > 72 || strings.TrimSpace(newPassword) == "" {
+		return ErrNewPassword
+	}
+	if newPassword == currentPassword {
+		return ErrSamePassword
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	changed, err := s.admins.ChangePassword(ctx, user.ID, user.PasswordHash, string(hash))
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return ErrSessionRequired
+	}
+	return nil
 }
 
 // ValidateToken 校验浏览器会话 token 或运维 API token 是否有效。

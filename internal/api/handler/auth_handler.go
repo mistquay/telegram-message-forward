@@ -9,6 +9,7 @@ import (
 
 	"telegram-message-forward/internal/api/dto"
 	appauth "telegram-message-forward/internal/app/auth"
+	domainadmin "telegram-message-forward/internal/domain/admin"
 )
 
 // AuthHandler 处理管理后台登录相关请求。
@@ -69,7 +70,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 	res, err := h.svc.Login(c.Request.Context(), strings.TrimSpace(req.Username), req.Password)
 	if err != nil {
-		if errors.Is(err, appauth.ErrInvalidCredential) {
+		if errors.Is(err, appauth.ErrInvalidCredential) || errors.Is(err, domainadmin.ErrCredentialChanged) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 			return
 		}
@@ -82,6 +83,28 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		Username:      res.Username,
 		ExpiresAt:     res.ExpiresAt,
 	}})
+}
+
+// ChangePassword POST /auth/password — 验证当前密码，改密成功后所有浏览器会话失效。
+func (h *AuthHandler) ChangePassword(c *gin.Context) {
+	var req dto.ChangePasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请填写当前密码和新密码"})
+		return
+	}
+	err := h.svc.ChangePassword(c.Request.Context(), bearerToken(c.GetHeader("Authorization")), req.CurrentPassword, req.NewPassword)
+	if err != nil {
+		switch {
+		case errors.Is(err, appauth.ErrSessionRequired):
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		case errors.Is(err, appauth.ErrCurrentPassword), errors.Is(err, appauth.ErrNewPassword), errors.Is(err, appauth.ErrSamePassword):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "修改密码失败，请稍后重试"})
+		}
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 // Me GET /auth/me — 返回当前登录身份状态。
@@ -101,7 +124,7 @@ func (h *AuthHandler) Me(c *gin.Context) {
 	}})
 }
 
-// Logout POST /auth/logout — 前端清理本地凭证；服务端当前无会话状态。
+// Logout POST /auth/logout — 吊销当前浏览器会话，前端清理本地凭证。
 func (h *AuthHandler) Logout(c *gin.Context) {
 	token := bearerToken(c.GetHeader("Authorization"))
 	if err := h.svc.Logout(c.Request.Context(), token); err != nil {
