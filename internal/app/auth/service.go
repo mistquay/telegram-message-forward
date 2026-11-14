@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	apptoken "telegram-message-forward/internal/app/apitoken"
@@ -71,10 +72,12 @@ func (ErrBootstrapClosed) Error() string { return "已存在管理凭证，初�
 var ErrInvalidCredential = errors.New("用户名或密码错误")
 
 var (
-	ErrSessionRequired = errors.New("请使用管理员账号重新登录后修改密码")
+	ErrSessionRequired = errors.New("请使用管理员账号重新登录后修改账户信息")
 	ErrCurrentPassword = errors.New("当前密码不正确")
 	ErrNewPassword     = errors.New("新密码至少需要 16 个字符，且不能超过 72 字节")
 	ErrSamePassword    = errors.New("新密码不能与当前密码相同")
+	ErrNewUsername     = errors.New("用户名需要 3～64 个字符，不能包含空白或控制字符")
+	ErrSameUsername    = errors.New("新用户名不能与当前用户名相同")
 )
 
 // LoginResult 是登录/初始化成功后的浏览器会话结果。
@@ -136,7 +139,7 @@ func (s *Service) createSession(ctx context.Context, user *domainadmin.User) (*L
 		TokenHash: security.HashToken(token),
 		ExpiresAt: expires,
 	}
-	if err := s.admins.CreateSession(ctx, sess, user.PasswordHash); err != nil {
+	if err := s.admins.CreateSession(ctx, sess, user.Username, user.PasswordHash); err != nil {
 		return nil, err
 	}
 	if err := s.admins.MarkUserLogin(ctx, user.ID, now); err != nil {
@@ -147,18 +150,9 @@ func (s *Service) createSession(ctx context.Context, user *domainadmin.User) (*L
 
 // ChangePassword 仅允许有效浏览器会话修改自身密码，API token 和免鉴权模式不能代替登录。
 func (s *Service) ChangePassword(ctx context.Context, token, currentPassword, newPassword string) error {
-	if strings.TrimSpace(token) == "" {
-		return ErrSessionRequired
-	}
-	sess, user, err := s.admins.GetActiveSessionByHash(ctx, security.HashToken(token), time.Now())
+	user, err := s.userForCredentialChange(ctx, token, currentPassword)
 	if err != nil {
 		return err
-	}
-	if sess == nil || user == nil {
-		return ErrSessionRequired
-	}
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
-		return ErrCurrentPassword
 	}
 	if utf8.RuneCountInString(newPassword) < 16 || len(newPassword) > 72 || strings.TrimSpace(newPassword) == "" {
 		return ErrNewPassword
@@ -170,7 +164,7 @@ func (s *Service) ChangePassword(ctx context.Context, token, currentPassword, ne
 	if err != nil {
 		return err
 	}
-	changed, err := s.admins.ChangePassword(ctx, user.ID, user.PasswordHash, string(hash))
+	changed, err := s.admins.ChangePassword(ctx, user.ID, user.Username, user.PasswordHash, string(hash))
 	if err != nil {
 		return err
 	}
@@ -178,6 +172,47 @@ func (s *Service) ChangePassword(ctx context.Context, token, currentPassword, ne
 		return ErrSessionRequired
 	}
 	return nil
+}
+
+// ChangeUsername 只修改当前会话所属账号，不允许指定其他用户。
+func (s *Service) ChangeUsername(ctx context.Context, token, currentPassword, newUsername string) error {
+	user, err := s.userForCredentialChange(ctx, token, currentPassword)
+	if err != nil {
+		return err
+	}
+	newUsername = strings.TrimSpace(newUsername)
+	length := utf8.RuneCountInString(newUsername)
+	if length < 3 || length > 64 || strings.IndexFunc(newUsername, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return ErrNewUsername
+	}
+	if newUsername == user.Username {
+		return ErrSameUsername
+	}
+	changed, err := s.admins.ChangeUsername(ctx, user.ID, user.Username, user.PasswordHash, newUsername)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return ErrSessionRequired
+	}
+	return nil
+}
+
+func (s *Service) userForCredentialChange(ctx context.Context, token, currentPassword string) (*domainadmin.User, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, ErrSessionRequired
+	}
+	sess, user, err := s.admins.GetActiveSessionByHash(ctx, security.HashToken(token), time.Now())
+	if err != nil {
+		return nil, err
+	}
+	if sess == nil || user == nil {
+		return nil, ErrSessionRequired
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+		return nil, ErrCurrentPassword
+	}
+	return user, nil
 }
 
 // ValidateToken 校验浏览器会话 token 或运维 API token 是否有效。

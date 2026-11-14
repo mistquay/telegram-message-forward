@@ -24,7 +24,12 @@ const (
 
 func passwordAuthToken(t *testing.T, router http.Handler, path, password string) string {
 	t.Helper()
-	code, body := do(t, router, http.MethodPost, path, "", map[string]string{"username": "admin", "password": password})
+	return accountAuthToken(t, router, path, "admin", password)
+}
+
+func accountAuthToken(t *testing.T, router http.Handler, path, username, password string) string {
+	t.Helper()
+	code, body := do(t, router, http.MethodPost, path, "", map[string]string{"username": username, "password": password})
 	if code != http.StatusCreated && code != http.StatusOK {
 		t.Fatalf("test login failed: status=%d", code)
 	}
@@ -144,11 +149,11 @@ type passwordChangeBeforeLoginRepo struct {
 	beforeCreate func()
 }
 
-func (r *passwordChangeBeforeLoginRepo) CreateSession(ctx context.Context, sess *domainadmin.Session, passwordHash string) error {
+func (r *passwordChangeBeforeLoginRepo) CreateSession(ctx context.Context, sess *domainadmin.Session, username, passwordHash string) error {
 	if r.beforeCreate != nil {
 		r.beforeCreate()
 	}
-	return r.fakeAdminRepo.CreateSession(ctx, sess, passwordHash)
+	return r.fakeAdminRepo.CreateSession(ctx, sess, username, passwordHash)
 }
 
 func TestPasswordChangePreventsStaleLoginFromIssuingSession(t *testing.T) {
@@ -165,7 +170,7 @@ func TestPasswordChangePreventsStaleLoginFromIssuingSession(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if changed, err := admins.ChangePassword(ctx, user.ID, user.PasswordHash, string(hash)); err != nil || !changed {
+		if changed, err := admins.ChangePassword(ctx, user.ID, user.Username, user.PasswordHash, string(hash)); err != nil || !changed {
 			t.Fatal("concurrent password change failed")
 		}
 	}

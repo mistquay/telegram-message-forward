@@ -818,6 +818,11 @@ type ChangePasswordRequest struct {
 	NewPassword     string `json:"new_password" binding:"required"`
 }
 
+type ChangeUsernameRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+	NewUsername     string `json:"new_username" binding:"required"`
+}
+
 // LoginResultDTO 是登录结果。
 type LoginResultDTO struct {
 	Authenticated bool      `json:"authenticated"`

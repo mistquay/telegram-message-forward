@@ -101,11 +101,11 @@ func (r *fakeAdminRepo) MarkUserLogin(_ context.Context, userID int64, at time.T
 	return nil
 }
 
-func (r *fakeAdminRepo) CreateSession(_ context.Context, s *domainadmin.Session, passwordHash string) error {
+func (r *fakeAdminRepo) CreateSession(_ context.Context, s *domainadmin.Session, username, passwordHash string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	u := r.users[s.UserID]
-	if u == nil || !u.Active || u.PasswordHash != passwordHash {
+	if u == nil || !u.Active || u.Username != username || u.PasswordHash != passwordHash {
 		return domainadmin.ErrCredentialChanged
 	}
 	r.nextSess++
@@ -118,14 +118,37 @@ func (r *fakeAdminRepo) CreateSession(_ context.Context, s *domainadmin.Session,
 	return nil
 }
 
-func (r *fakeAdminRepo) ChangePassword(_ context.Context, userID int64, oldHash, newHash string) (bool, error) {
+func (r *fakeAdminRepo) ChangePassword(_ context.Context, userID int64, username, oldHash, newHash string) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	u := r.users[userID]
-	if u == nil || !u.Active || u.PasswordHash != oldHash {
+	if u == nil || !u.Active || u.Username != username || u.PasswordHash != oldHash {
 		return false, nil
 	}
 	u.PasswordHash = newHash
+	now := time.Now()
+	u.UpdatedAt = now
+	for _, sess := range r.sessions {
+		if sess.UserID == userID && sess.RevokedAt == nil {
+			sess.RevokedAt = &now
+		}
+	}
+	return true, nil
+}
+
+func (r *fakeAdminRepo) ChangeUsername(_ context.Context, userID int64, oldUsername, passwordHash, newUsername string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u := r.users[userID]
+	if u == nil || !u.Active || u.Username != oldUsername || u.PasswordHash != passwordHash {
+		return false, nil
+	}
+	for _, existing := range r.users {
+		if existing.ID != userID && existing.Username == newUsername {
+			return false, domainadmin.ErrUsernameTaken
+		}
+	}
+	u.Username = newUsername
 	now := time.Now()
 	u.UpdatedAt = now
 	for _, sess := range r.sessions {
@@ -265,9 +288,12 @@ func buildRouter(t *testing.T, authEnabled bool, repo *fakeTokenRepo) *gin.Engin
 }
 
 func buildRouterWithWebDir(t *testing.T, authEnabled bool, repo *fakeTokenRepo, webDir string) *gin.Engine {
+	return buildRouterWithRepos(t, authEnabled, repo, newFakeAdminRepo(), webDir)
+}
+
+func buildRouterWithRepos(t *testing.T, authEnabled bool, repo *fakeTokenRepo, adminRepo *fakeAdminRepo, webDir string) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	adminRepo := newFakeAdminRepo()
 	tokenSvc := apptoken.NewService(repo)
 	authSvc := appauth.NewService(adminRepo, repo, tokenSvc, authEnabled)
 	sinkSvc := appsink.NewService(fakeSinkRepo{})

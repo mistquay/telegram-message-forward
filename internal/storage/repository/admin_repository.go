@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -76,8 +77,8 @@ func (r *AdminRepository) MarkUserLogin(ctx context.Context, userID int64, at ti
 	return r.db.WithContext(ctx).Model(&model.AdminUser{}).Where("id = ?", userID).Update("last_login_at", at).Error
 }
 
-// CreateSession 锁定用户后核对密码版本，避免旧密码登录与改密并发时遗留有效会话。
-func (r *AdminRepository) CreateSession(ctx context.Context, s *domainadmin.Session, passwordHash string) error {
+// CreateSession 锁定用户后核对凭证，避免旧用户名或旧密码登录与凭证修改并发时遗留有效会话。
+func (r *AdminRepository) CreateSession(ctx context.Context, s *domainadmin.Session, username, passwordHash string) error {
 	m := &model.AdminSession{
 		UserID:    s.UserID,
 		TokenHash: s.TokenHash,
@@ -86,7 +87,7 @@ func (r *AdminRepository) CreateSession(ctx context.Context, s *domainadmin.Sess
 	if err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var user model.AdminUser
 		err := tx.Clauses(clause.Locking{Strength: "SHARE"}).Select("id").
-			Where("id = ? AND active = ? AND password_hash = ?", s.UserID, true, passwordHash).First(&user).Error
+			Where("id = ? AND active = ? AND username = ? AND password_hash = ?", s.UserID, true, username, passwordHash).First(&user).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return domainadmin.ErrCredentialChanged
 		}
@@ -102,14 +103,28 @@ func (r *AdminRepository) CreateSession(ctx context.Context, s *domainadmin.Sess
 	return nil
 }
 
-// ChangePassword 使用旧哈希做并发校验；更新密码和吊销会话必须一同提交或回滚。
-func (r *AdminRepository) ChangePassword(ctx context.Context, userID int64, oldHash, newHash string) (bool, error) {
+func (r *AdminRepository) ChangePassword(ctx context.Context, userID int64, username, oldHash, newHash string) (bool, error) {
+	return r.updateCredentials(ctx, userID, username, oldHash, map[string]any{"password_hash": newHash})
+}
+
+func (r *AdminRepository) ChangeUsername(ctx context.Context, userID int64, oldUsername, passwordHash, newUsername string) (bool, error) {
+	changed, err := r.updateCredentials(ctx, userID, oldUsername, passwordHash, map[string]any{"username": newUsername})
+	var pgErr *pgconn.PgError
+	if errors.Is(err, gorm.ErrDuplicatedKey) || (errors.As(err, &pgErr) && pgErr.Code == "23505") {
+		return false, domainadmin.ErrUsernameTaken
+	}
+	return changed, err
+}
+
+// updateCredentials 核对原凭证，保证凭证更新与吊销会话一同提交或回滚。
+func (r *AdminRepository) updateCredentials(ctx context.Context, userID int64, username, passwordHash string, changes map[string]any) (bool, error) {
 	changed := false
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := time.Now()
+		changes["updated_at"] = now
 		result := tx.Model(&model.AdminUser{}).
-			Where("id = ? AND active = ? AND password_hash = ?", userID, true, oldHash).
-			Updates(map[string]any{"password_hash": newHash, "updated_at": now})
+			Where("id = ? AND active = ? AND username = ? AND password_hash = ?", userID, true, username, passwordHash).
+			Updates(changes)
 		if result.Error != nil || result.RowsAffected == 0 {
 			return result.Error
 		}

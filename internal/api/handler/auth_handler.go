@@ -107,6 +107,30 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// ChangeUsername 验证当前密码，改名成功后全部浏览器会话失效。
+func (h *AuthHandler) ChangeUsername(c *gin.Context) {
+	var req dto.ChangeUsernameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请填写当前密码和新用户名"})
+		return
+	}
+	err := h.svc.ChangeUsername(c.Request.Context(), bearerToken(c.GetHeader("Authorization")), req.CurrentPassword, req.NewUsername)
+	if err != nil {
+		switch {
+		case errors.Is(err, appauth.ErrSessionRequired):
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		case errors.Is(err, appauth.ErrCurrentPassword), errors.Is(err, appauth.ErrNewUsername), errors.Is(err, appauth.ErrSameUsername):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		case errors.Is(err, domainadmin.ErrUsernameTaken):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "修改用户名失败，请稍后重试"})
+		}
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 // Me GET /auth/me — 返回当前登录身份状态。
 func (h *AuthHandler) Me(c *gin.Context) {
 	token := bearerToken(c.GetHeader("Authorization"))

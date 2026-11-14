@@ -14,7 +14,7 @@ const loading = ref(false)
 const ready = ref(false)
 
 // 表单输入。
-const username = ref('admin')
+const username = ref('')
 const password = ref('')
 const bootstrapUsername = ref('admin')
 const bootstrapPassword = ref('')

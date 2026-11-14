@@ -56,8 +56,9 @@ func NewRouter(deps Deps) *gin.Engine {
 		authGroup.GET("/bootstrap", deps.Auth.BootstrapStatus)
 		authGroup.POST("/bootstrap", deps.Auth.Bootstrap)
 		authGroup.POST("/login", deps.Auth.Login)
-		// 改密在应用层强制验证浏览器会话和当前密码，不受免鉴权开关影响。
+		// 凭证修改在应用层强制验证浏览器会话和当前密码，不受免鉴权开关影响。
 		authGroup.POST("/password", deps.Auth.ChangePassword)
+		authGroup.POST("/username", deps.Auth.ChangeUsername)
 		authGroup.GET("/me", deps.Auth.Me)
 		authGroup.POST("/logout", deps.Auth.Logout)
 	}

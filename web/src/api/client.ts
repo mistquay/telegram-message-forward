@@ -127,6 +127,8 @@ export const authApi = {
   me: () => http.get<ApiItem<Me>>('/auth/me').then((r) => r.data.data),
   changePassword: (currentPassword: string, newPassword: string) =>
     http.post<void>('/auth/password', { current_password: currentPassword, new_password: newPassword }),
+  changeUsername: (currentPassword: string, newUsername: string) =>
+    http.post<void>('/auth/username', { current_password: currentPassword, new_username: newUsername }),
   logout: () => http.post('/auth/logout'),
 }
 

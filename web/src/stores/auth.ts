@@ -67,6 +67,10 @@ export const useAuthStore = defineStore('auth', {
       await authApi.changePassword(currentPassword, newPassword)
       this.clearSession()
     },
+    async changeUsername(currentPassword: string, newUsername: string) {
+      await authApi.changeUsername(currentPassword, newUsername)
+      this.clearSession()
+    },
     // 退出登录：清理本地凭证并回到未登录态。
     async logout() {
       try {

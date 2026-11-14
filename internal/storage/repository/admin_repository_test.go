@@ -71,7 +71,7 @@ func seedAdminSession(t *testing.T, db *gorm.DB, name string) (*model.AdminUser,
 		t.Fatal(err)
 	}
 	sess := &domainadmin.Session{UserID: user.ID, TokenHash: "test-session-" + name, ExpiresAt: time.Now().Add(time.Hour)}
-	if err := repository.NewAdminRepository(db).CreateSession(context.Background(), sess, user.PasswordHash); err != nil {
+	if err := repository.NewAdminRepository(db).CreateSession(context.Background(), sess, user.Username, user.PasswordHash); err != nil {
 		t.Fatal(err)
 	}
 	return user, sess
@@ -83,7 +83,7 @@ func TestAdminPasswordChangeRevokesOnlyTargetSessions(t *testing.T) {
 	user, sess := seedAdminSession(t, db, "target")
 	_, otherSess := seedAdminSession(t, db, "other")
 	ctx := context.Background()
-	if changed, err := repo.ChangePassword(ctx, user.ID, "old-test-hash", "new-test-hash"); err != nil || !changed {
+	if changed, err := repo.ChangePassword(ctx, user.ID, user.Username, "old-test-hash", "new-test-hash"); err != nil || !changed {
 		t.Fatalf("password change failed: changed=%t err=%v", changed, err)
 	}
 	if current, _, err := repo.GetActiveSessionByHash(ctx, sess.TokenHash, time.Now()); err != nil || current != nil {
@@ -93,13 +93,13 @@ func TestAdminPasswordChangeRevokesOnlyTargetSessions(t *testing.T) {
 		t.Fatal("another user's session must remain active")
 	}
 	stale := &domainadmin.Session{UserID: user.ID, TokenHash: "stale-session", ExpiresAt: time.Now().Add(time.Hour)}
-	if err := repo.CreateSession(ctx, stale, "old-test-hash"); !errors.Is(err, domainadmin.ErrCredentialChanged) {
+	if err := repo.CreateSession(ctx, stale, user.Username, "old-test-hash"); !errors.Is(err, domainadmin.ErrCredentialChanged) {
 		t.Fatalf("old password version must not issue a session: %v", err)
 	}
-	if changed, err := repo.ChangePassword(ctx, user.ID, "old-test-hash", "unexpected-hash"); err != nil || changed {
+	if changed, err := repo.ChangePassword(ctx, user.ID, user.Username, "old-test-hash", "unexpected-hash"); err != nil || changed {
 		t.Fatal("a stale concurrent password update must be rejected")
 	}
-	if err := repo.CreateSession(ctx, stale, "new-test-hash"); err != nil {
+	if err := repo.CreateSession(ctx, stale, user.Username, "new-test-hash"); err != nil {
 		t.Fatal("new password version must issue a session")
 	}
 }
@@ -112,7 +112,7 @@ func TestAdminPasswordChangeRollsBackWhenSessionRevocationFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := repository.NewAdminRepository(db)
-	if changed, err := repo.ChangePassword(context.Background(), user.ID, "old-test-hash", "new-test-hash"); err == nil || changed {
+	if changed, err := repo.ChangePassword(context.Background(), user.ID, user.Username, "old-test-hash", "new-test-hash"); err == nil || changed {
 		t.Fatal("session revocation failure must fail the password change")
 	}
 	var stored model.AdminUser
@@ -121,5 +121,80 @@ func TestAdminPasswordChangeRollsBackWhenSessionRevocationFails(t *testing.T) {
 	}
 	if current, _, err := repo.GetActiveSessionByHash(context.Background(), sess.TokenHash, time.Now()); err != nil || current == nil {
 		t.Fatal("rolled-back change must preserve the original session")
+	}
+}
+
+func TestAdminUsernameChangeRevokesSessionsAndRejectsStaleCredentials(t *testing.T) {
+	db := adminTestDatabase(t)
+	repo := repository.NewAdminRepository(db)
+	user, sess := seedAdminSession(t, db, "old-owner")
+	_, other := seedAdminSession(t, db, "other-owner")
+	ctx := context.Background()
+	if changed, err := repo.ChangeUsername(ctx, user.ID, user.Username, user.PasswordHash, "new-owner"); err != nil || !changed {
+		t.Fatalf("username change failed: %v", err)
+	}
+	if current, _, err := repo.GetActiveSessionByHash(ctx, sess.TokenHash, time.Now()); err != nil || current != nil {
+		t.Fatal("username change must revoke the user's session")
+	}
+	if current, _, err := repo.GetActiveSessionByHash(ctx, other.TokenHash, time.Now()); err != nil || current == nil {
+		t.Fatal("username change must preserve another user's session")
+	}
+	var stored model.AdminUser
+	if err := db.First(&stored, user.ID).Error; err != nil || stored.Username != "new-owner" || stored.PasswordHash != user.PasswordHash {
+		t.Fatal("username change must preserve the password hash")
+	}
+	stale := &domainadmin.Session{UserID: user.ID, TokenHash: "stale-name-session", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := repo.CreateSession(ctx, stale, user.Username, user.PasswordHash); !errors.Is(err, domainadmin.ErrCredentialChanged) {
+		t.Fatal("old username must not issue a new session after a rename")
+	}
+	if changed, err := repo.ChangePassword(ctx, user.ID, user.Username, user.PasswordHash, "unexpected"); err != nil || changed {
+		t.Fatal("password update from stale username credentials must be rejected")
+	}
+	if changed, err := repo.ChangeUsername(ctx, user.ID, user.Username, user.PasswordHash, "unexpected"); err != nil || changed {
+		t.Fatal("username update from stale credentials must be rejected")
+	}
+	if err := repo.CreateSession(ctx, stale, stored.Username, stored.PasswordHash); err != nil {
+		t.Fatal("new username must issue a session with the existing password")
+	}
+}
+
+func TestAdminUsernameChangeConflictPreservesCredentialsAndSessions(t *testing.T) {
+	for _, translate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("translate_error_%t", translate), func(t *testing.T) {
+			db := adminTestDatabase(t)
+			db.Config.TranslateError = translate
+			user, sess := seedAdminSession(t, db, "current-owner")
+			_, _ = seedAdminSession(t, db, "occupied")
+			repo := repository.NewAdminRepository(db)
+			if changed, err := repo.ChangeUsername(context.Background(), user.ID, user.Username, user.PasswordHash, "occupied"); changed || !errors.Is(err, domainadmin.ErrUsernameTaken) {
+				t.Fatalf("duplicate username must return the domain conflict error: changed=%t err=%v", changed, err)
+			}
+			var stored model.AdminUser
+			if err := db.First(&stored, user.ID).Error; err != nil || stored.Username != user.Username || stored.PasswordHash != user.PasswordHash {
+				t.Fatal("conflict must preserve the original credentials")
+			}
+			if current, _, err := repo.GetActiveSessionByHash(context.Background(), sess.TokenHash, time.Now()); err != nil || current == nil {
+				t.Fatal("conflict must preserve the original session")
+			}
+		})
+	}
+}
+
+func TestAdminUsernameChangeRollsBackWhenSessionRevocationFails(t *testing.T) {
+	db := adminTestDatabase(t)
+	user, sess := seedAdminSession(t, db, "rollback-owner")
+	if err := db.Exec("ALTER TABLE admin_sessions ADD CONSTRAINT test_block_rename CHECK (revoked_at IS NULL)").Error; err != nil {
+		t.Fatal(err)
+	}
+	repo := repository.NewAdminRepository(db)
+	if changed, err := repo.ChangeUsername(context.Background(), user.ID, user.Username, user.PasswordHash, "new-owner"); err == nil || changed {
+		t.Fatal("session revocation failure must fail the username change")
+	}
+	var stored model.AdminUser
+	if err := db.First(&stored, user.ID).Error; err != nil || stored.Username != user.Username {
+		t.Fatal("session revocation failure must roll back the username")
+	}
+	if current, _, err := repo.GetActiveSessionByHash(context.Background(), sess.TokenHash, time.Now()); err != nil || current == nil {
+		t.Fatal("failed rename must preserve the original session")
 	}
 }
